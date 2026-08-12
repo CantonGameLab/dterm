@@ -1,11 +1,5 @@
-// 缓存层：
-//   1. 内存文件缓存 —— 同一字体文件字节只读一次磁盘，多个采样尺寸共享。
-//   2. 磁盘光栅化缓存 —— 把图集像素 + 字形表持久化到 cache/fonts/，
-//      下次启动同 (路径, 尺寸) 直接加载，跳过全部 CPU 光栅化。
-//
-// 失效策略：缓存 key = fnv64a(绝对路径 + 文件 mtime + 文件大小 + 采样尺寸)，
-// 字体文件被修改/替换后 key 变化，自然 miss；旧缓存文件成为孤儿文件，
-// 可在应用退出时按目录清理（当前版本不做自动清理）。
+// 缓存层:内存文件缓存(同一字体只读一次磁盘)+ 磁盘光栅化缓存(cache/fonts/)。
+// key = fnv64a(路径 + mtime + 大小 + 采样尺寸),字体改动后自然 miss。
 package font
 
 import "core:c"
@@ -19,28 +13,26 @@ import "core:time"
 CACHE_MAGIC   :: 0x43544644 // "DTFC"
 CACHE_VERSION :: 1
 
-// CacheHeader 磁盘缓存文件头（定长，小端）
 CacheHeader :: struct {
 	magic:       u32,
 	version:     u32,
-	path_hash:   u64, // == Font.cache_key，校验用
+	path_hash:   u64, // == Font.cache_key,校验用
 	pixel_size:  f32,
 	oversample:  u32, // OVER_SAMPLE_X | OVER_SAMPLE_Y << 16
 	atlas_w:     u32,
 	atlas_h:     u32,
 	glyph_count: u32,
-	pixels_len:  u32, // 图集像素字节数
+	pixels_len:  u32,
 }
 
-// CacheEntry 单个字形的持久化形式（按打包顺序排列）
 CacheEntry :: struct {
 	codepoint:   u32,
 	glyph_index: i32,
-	x0, y0, x1, y1: u16, // 图集内像素矩形（含 padding）
-	xoff, yoff: f32,     // 位图偏移（正常空间）
-	xoff2, yoff2: f32,   // 位图右下角（正常空间）
+	x0, y0, x1, y1: u16, // 图集内像素矩形(含 padding)
+	xoff, yoff: f32,     // 位图偏移
+	xoff2, yoff2: f32,   // 位图右下角
 	advance:     f32,
-	batch:       u32, // 打包批次号（布局重放用）
+	batch:       u32, // 打包批次号(布局重放用)
 }
 
 // ---- 进程内文件字节缓存 ----
@@ -49,13 +41,11 @@ file_cache: map[string][]byte
 // ---- 缓存目录 ----
 cache_dir: string
 
-// set_cache_dir 自定义磁盘缓存目录（默认 <exe目录>/cache/fonts）。
-set_cache_dir :: proc(dir: string) {
+SetCacheDir :: proc(dir: string) {
 	cache_dir = strings.clone(dir)
 }
 
-// get_cache_dir 返回缓存目录（首次调用时按 exe 位置计算默认值）。
-get_cache_dir :: proc() -> string {
+GetCacheDir :: proc() -> string {
 	if cache_dir != "" {
 		return cache_dir
 	}
@@ -67,8 +57,7 @@ get_cache_dir :: proc() -> string {
 	return cache_dir
 }
 
-// cache_key_of 计算缓存 key：路径 + 文件指纹（mtime/大小）+ 采样尺寸。
-cache_key_of :: proc(f: ^Font, file_size: i64, mtime: time.Time) -> u64 {
+CacheKeyOf :: proc(f: ^Font, file_size: i64, mtime: time.Time) -> u64 {
 	h := hash.fnv64a(transmute([]byte)f.path)
 	m := mtime
 	sz := file_size
@@ -78,12 +67,12 @@ cache_key_of :: proc(f: ^Font, file_size: i64, mtime: time.Time) -> u64 {
 	return h
 }
 
-cache_file_path :: proc(key: u64) -> string {
-	return fmt.tprintf("%s/font_%016x.dtfc", get_cache_dir(), key)
+CacheFilePath :: proc(key: u64) -> string {
+	return fmt.tprintf("%s/font_%016x.dtfc", GetCacheDir(), key)
 }
 
-// get_font_data 按路径取字体文件字节（内存记忆化：只读一次磁盘）。
-get_font_data :: proc(path: string) -> ([]byte, bool) {
+// 内存记忆化:同一路径只读一次磁盘
+GetFontData :: proc(path: string) -> ([]byte, bool) {
 	if data, ok := file_cache[path]; ok {
 		return data, true
 	}
@@ -95,12 +84,11 @@ get_font_data :: proc(path: string) -> ([]byte, bool) {
 	return data, true
 }
 
-// save_font_cache 把图集 + 字形表写入磁盘缓存。
-save_font_cache :: proc(font: ^Font) -> bool {
+SaveFontCache :: proc(font: ^Font) -> bool {
 	if font.cache_key == 0 || !font.dirty {
 		return true
 	}
-	dir := get_cache_dir()
+	dir := GetCacheDir()
 	if os.make_directory_all(dir) != nil {
 		return false
 	}
@@ -145,20 +133,19 @@ save_font_cache :: proc(font: ^Font) -> bool {
 	}
 	copy(buf[size_of(CacheHeader) + entry_bytes:], font.atlas.pixels)
 
-	if os.write_entire_file(cache_file_path(font.cache_key), buf) != nil {
+	if os.write_entire_file(CacheFilePath(font.cache_key), buf) != nil {
 		return false
 	}
 	font.dirty = false
 	return true
 }
 
-// try_load_disk_cache 尝试从磁盘缓存恢复字体实例。
-// 成功：重建图集像素 + 字形表 + 包器状态（零光栅化），并设置 from_cache。
-try_load_disk_cache :: proc(f: ^Font) -> bool {
+// 命中磁盘缓存:零光栅化恢复图集 + 字形表 + 包器状态
+TryLoadDiskCache :: proc(f: ^Font) -> bool {
 	if f.cache_key == 0 {
 		return false
 	}
-	raw, err := os.read_entire_file(cache_file_path(f.cache_key), context.allocator)
+	raw, err := os.read_entire_file(CacheFilePath(f.cache_key), context.allocator)
 	if err != nil {
 		return false
 	}
@@ -191,10 +178,7 @@ try_load_disk_cache :: proc(f: ^Font) -> bool {
 		return false
 	}
 
-	// 用缓存中的尺寸重建图集（PackBegin 会清零缓冲，随后恢复像素）
-	if !atlas_create(f, hdr.atlas_w, hdr.atlas_h) {
-		return false
-	}
+	atlasCreate(f, hdr.atlas_w, hdr.atlas_h) // PackBegin 清零缓冲,随后恢复像素
 	copy(f.atlas.pixels, raw[size_of(CacheHeader) + entry_bytes:])
 
 	entries := mem.slice_ptr(
@@ -202,7 +186,6 @@ try_load_disk_cache :: proc(f: ^Font) -> bool {
 		int(hdr.glyph_count),
 	)
 
-	// 重建字形表与打包顺序
 	f.glyphs = make(map[rune]Glyph, int(hdr.glyph_count))
 	max_batch: u32
 	for e in entries {
@@ -234,8 +217,7 @@ try_load_disk_cache :: proc(f: ^Font) -> bool {
 	f.from_cache = true
 	f.dirty = false
 
-	// 重放打包布局 + 上传图集
-	atlas_replay(f)
-	atlas_upload_full(&f.atlas)
+	atlasReplay(f)
+	atlasUploadFull(&f.atlas)
 	return true
 }

@@ -1,0 +1,61 @@
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(28:12) Error: 'context' of type 'Context' has no field 'copy'
+        context = context.copy()
+                  ^~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(29:8) Error: 'context' of type 'Context' has no field 'heap_allocator_destroy'
+        defer context.heap_allocator_destroy()
+              ^~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(34:29) Error: 'read_write_data' of type '^ReadWriteData' has no field 'conpty_context'
+        n, ok := readConptyOutput(read_write_data.conpty_context, buf)
+                                  ^~~~~~~~~~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(49:4) Error: 'sleep' is not declared by 'thread'
+        thread.sleep(1 * time.Millisecond)
+        ^~~~~~~~~~~^
+        Suggestion: Did you mean?
+                start
+                yield
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(57:3) Error: Undeclared name: atomic
+        atomic.store(&read_write_data.tail, read_write_data.tai ...
+        ^~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(57:66) Error: Cannot determine type for implicit selector expression '.Release'
+        ... store(&read_write_data.tail, read_write_data.tail + n, .Release)
+                                                                    ^~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(64:32) Error: Undeclared name: atomic
+        ... d_write_data.tail - atomic.load(&read_write_data.head, .Acquire)
+                                ^~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(64:68) Error: Cannot determine type for implicit selector expression '.Acquire'
+        ... d_write_data.tail - atomic.load(&read_write_data.head, .Acquire)
+                                                                    ^~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(76:3) Error: Undeclared name: atomic
+        atomic.store(&read_write_data.head, read_write_data.hea ...
+        ^~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(76:66) Error: Cannot determine type for implicit selector expression '.Release'
+        ... store(&read_write_data.head, read_write_data.head + 1, .Release)
+                                                                    ^~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(85:28) Error: Cannot convert untyped value 'nil' to 'ConptyContext' from 'untyped nil'
+        if conpty_contexts[id] == nil {
+                                  ^~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(90:41) Error: Undeclared name: read_thread_proc
+        ... e_data.thread = thread.create(read_thread_proc, read_write_data)
+                                          ^~~~~~~~~~~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(90:59) Error: Cannot assign value 'read_write_data' of type '^ReadWriteData' to 'Thread_Priority' in a procedure argument
+        ... e_data.thread = thread.create(read_thread_proc, read_write_data)
+                                                            ^~~~~~~~~~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(104:18) Error: 'read_write_data' of type '^ReadWriteData' has no field 'conpty_context'
+        win.CloseHandle(read_write_data.conpty_context.read_conpty)
+                        ^~~~~~~~~~~~~~^
+
+C:/Users/GroupTheory/Source/dterm/src/conpty/readwrite.odin(105:2) Error: 'read_write_data' of type '^ReadWriteData' has no field 'conpty_context'
+        read_write_data.conpty_context.read_conpty = win.INVALI ...
+        ^~~~~~~~~~~~~~^

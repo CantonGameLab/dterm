@@ -9,7 +9,8 @@ PROC_THREAD_ATTRIBUTE_LIST :: rawptr
 LPPROC_THREAD_ATTRIBUTE_LIST :: ^PROC_THREAD_ATTRIBUTE_LIST
 
 PSEUDOCONSOLE_INHERIT_CURSOR :: 1
-PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE :: 0x00020016
+PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE :: 0x00020016 //虚拟终端属性记号
+STILL_ACTIVE :: 0x00000103 // GetExitCodeProcess 中进程仍存活
 
 STARTUPINFOEXW :: struct {
 	StartupInfo: win.STARTUPINFOW,
@@ -58,7 +59,7 @@ foreign kernel32 {
 		lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
 	) ---
 }
-	
+
 createPseudoConsole :: proc(
 	size : win.COORD,
 	hinput : win.HANDLE,
@@ -75,12 +76,11 @@ resizePseudoConsole :: proc(
 	size: win.COORD
 ) -> win.HRESULT {
 	return _ResizePseudoConsole(hpc, size)
-} 
+}
 
 closePseudoConsole :: proc(
 	hpc : HPCON
 ) {
 	_ClosePseudoConsole(hpc)
 }
-
 
