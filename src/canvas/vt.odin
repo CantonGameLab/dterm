@@ -62,7 +62,7 @@ vtFeed :: proc(console_id : u32, data : []byte) {
 				vt.utf8_pending[vt.utf8_pending_len] = b
 				vt.utf8_pending_len += 1
 				if vt.utf8_pending_len >= vtUtf8Len(vt.utf8_pending[0]) {
-					vtPrint(console_id, vtDecodeRune(vt.utf8_pending[:]))
+					vtPrint(console_id, vtDecodeRune(vt.utf8_pending[:vt.utf8_pending_len]))
 					vt.utf8_pending_len = 0
 				}
 				continue
@@ -568,4 +568,9 @@ vtReplyCursor :: proc(console_id : u32) {
 	}
 	msg := fmt.tprintf("\x1b[%d;%dR", int(console.cursor_row) + 1, int(console.cursor_col) + 1)
 	ct.WriteConptyInput(console_id, transmute([]byte)msg)
+}
+
+// 调试/测试:直接喂字节给解析器,绕过 ConPTY
+ConsoleFeed :: proc(console_id : u32, data : []byte) {
+	vtFeed(console_id, data)
 }

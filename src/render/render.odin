@@ -21,7 +21,8 @@ screen_w, screen_h : f32
 // 着色器
 // ---------------------------------------------------------------------------
 
-VERT_SRC :: `#version 440 core
+VERT_SRC :: `
+#version 440 core
 layout(location = 0) in vec2 aPos;
 layout(location = 1) in vec2 aUv;
 layout(location = 2) in vec4 aColor;
@@ -36,13 +37,15 @@ void main() {
 }
 `
 
-FRAG_SRC :: `#version 440 core
+FRAG_SRC :: `
+#version 440 core
 in vec2 vUv;
 in vec4 vColor;
 uniform sampler2D uTex;
 out vec4 fragColor;
 void main() {
-    fragColor = vColor * texture(uTex, vUv);
+    // 图集为 R8 灰度:灰度值作 alpha,颜色纯由顶点色给出
+    fragColor = vec4(vColor.rgb, vColor.a * texture(uTex, vUv).r);
 }
 `
 
@@ -177,24 +180,23 @@ DrawRect :: proc(x, y, w, h : f32, color : u32) {
 	pushQuad(white_tex, x, y, x + w, y + h, 0, 0, 1, 1, color)
 }
 
-// 文本,(x, y) = 基线位置
-DrawText :: proc(font : ^fnt.Font, text : string, x, y : f32, color : u32) {
-	tex := fnt.GetAtlasTexture(font)
+// 文本,(x, y) = 基线位置;font_id 为 font 包槽位 id
+DrawText :: proc(font_id : u32, text : string, x, y : f32, color : u32) {
+	tex := fnt.GetAtlasTexture(font_id)
+	m := fnt.GetMetrics(font_id)
 	pen_x, pen_y := x, y
 	for r in text {
 		if r == '\n' {
 			pen_x = x
-			pen_y += fnt.GetMetrics(font).line_height
+			pen_y += m.cell_height
 			continue
 		}
-		g, ok := fnt.GetGlyph(font, r)
+		g, ok := fnt.GetGlyph(font_id, r)
 		if !ok {
-			pen_x += font.size
+			pen_x += m.cell_width
 			continue
 		}
-		if !g.empty {
-			pushQuad(tex, pen_x + g.bearing_x, pen_y + g.bearing_y, pen_x + g.bearing_x + g.width, pen_y + g.bearing_y + g.height, g.u0, g.v0, g.u1, g.v1, color)
-		}
+		pushQuad(tex, pen_x + g.xoff, pen_y + g.yoff, pen_x + g.xoff + g.bitmap_w, pen_y + g.yoff + g.bitmap_h, g.uv0_x, g.uv0_y, g.uv1_x, g.uv1_y, color)
 		pen_x += g.advance
 	}
 }

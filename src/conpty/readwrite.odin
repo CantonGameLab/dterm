@@ -21,7 +21,7 @@ read_write_datas : [MAX_CONPTY_SLOTS]ReadWriteData
 
 // 阻塞读管道 → 写环形缓冲;ReadFile 被 CloseHandle 打断(失败)时退出
 readThreadProc :: proc(t: ^thread.Thread) {
-	id := (cast(^u32)t)^ // id 经 thread.data 传入
+	id := (cast(^u32)t.data)^ // id 经 thread.data 传入
 	read_write_data := &read_write_datas[id]
 	conpty_context := GetConptyContext(id)
 	if conpty_context == nil {

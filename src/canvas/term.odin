@@ -6,8 +6,9 @@ import ct "../conpty"
 //   内容层 TermBuffer:一"页"的所有行(含滚动历史)。
 //   视口层 Console:行列、光标、登记/激活的页、滚动偏移、VT 状态。
 //   Console 与 ConptyContext 同 id 同步;函数间传递一律用 id,内部自查槽位。
-//   渲染契约:visible_top = max(0, len(lines) - rows - scroll_offset)
+//   渲染契约:visible_top = max(0, len(lines) - rows - tb.scroll_offset) // scroll_offset 随 buffer
 //            屏幕第 r 行 ↔ lines[visible_top + r];光标屏幕位置 = cursor_row - visible_top
+//            第 r 行第 c 列格子左上角像素 = (origin_x + c*cell_w, origin_y + r*cell_h);cell 来自 font 度量
 
 // 0xFFFFFFFF = 渲染时查主题色
 DEFAULT_COLOR :: 0xFFFF_FFFF
@@ -37,6 +38,7 @@ TRIM_SLACK :: 512 // 超上限这么多行才裁,避免频繁搬行
 
 TermBuffer :: struct {
 	lines : [dynamic]Line, // nil = 空槽
+	scroll_offset : u32,
 }
 
 // id 约定:count 从 1 起,id 0 永不分配 → 0 = 空/null
@@ -49,6 +51,7 @@ CreateTermBuffer :: proc() -> (id : u32, ok : bool) {
 			continue
 		}
 		term_buffers[i].lines = make([dynamic]Line)
+		append(&term_buffers[i].lines, Line{}) // make 后 data 仍为 nil,append 占位让判空可靠
 		if u32(i) + 1 > term_buffers_count {
 			term_buffers_count = u32(i) + 1
 		}
@@ -108,6 +111,7 @@ MAX_BUFFERS_PER_CONSOLE :: 8
 
 Console :: struct {
 	rows, cols : u16,
+	origin_x, origin_y : f32, // 居中后网格左上角(iterm 坐标空间);每帧由 ConsoleUpdateLayout 重算
 	cursor_row, cursor_col : u16, // 指向 active buffer 的物理行
 
 	vt : VtState,
@@ -116,7 +120,8 @@ Console :: struct {
 	term_buffer_count : u32,
 	active_term_buffer_id : u32, // 当前渲染/写入的页;0 = 未登记
 
-	scroll_offset : u32, // 距底部翻页行数;0 = 跟随底部
+	font_id : u32, // 布局取度量、渲染取图集;0 = 未设
+	font_size : f32, // 创建时的目标字号
 }
 
 consoles_count : u32 = 1
@@ -150,7 +155,11 @@ CreateConsole :: proc(rows, cols : u16, conpty_id : u32) -> (id : u32, ok : bool
 		scroll_bottom = rows - 1,
 		style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR },
 	}
-	ConsoleAttachTermBuffer(conpty_id, tb_id)
+	if !ConsoleAttachTermBuffer(conpty_id, tb_id) {
+		DestroyTermBuffer(tb_id)
+		consoles[conpty_id] = {}
+		return 0, false
+	}
 	if conpty_id + 1 > consoles_count {
 		consoles_count = conpty_id + 1
 	}
@@ -230,16 +239,36 @@ ConsoleActivateTermBuffer :: proc(console_id, term_buffer_id : u32) -> bool {
 	return false
 }
 
+// 改网格尺寸的公共副作用:cursor/滚动区下限 clamp
+applyConsoleSize :: proc(console : ^Console, rows, cols : u16) {
+	console.rows, console.cols = rows, cols
+	console.cursor_row = min(console.cursor_row, rows - 1)
+	console.cursor_col = min(console.cursor_col, cols - 1)
+	console.vt.scroll_bottom = rows - 1
+}
+
 // Resize 时先改 ConPTY 再改这里;已有行不截断
 ConsoleSetSize :: proc(console_id : u32, rows, cols : u16) -> bool {
 	console := GetConsole(console_id)
 	if console == nil || rows == 0 || cols == 0 {
 		return false
 	}
-	console.rows, console.cols = rows, cols
-	console.cursor_row = min(console.cursor_row, rows - 1)
-	console.cursor_col = min(console.cursor_col, cols - 1)
-	console.vt.scroll_bottom = rows - 1
+	applyConsoleSize(console, rows, cols)
+	return true
+}
+
+// iterm 几何变化时由渲染层每帧调用(transform 现算不存):
+// 取整出 cols/rows,网格在 iterm 内居中;cols/rows 变化后 ConPTY 尺寸由调用方联动
+ConsoleUpdateLayout :: proc(console_id : u32, t : Transform, cell_w, cell_h : f32) -> bool {
+	console := GetConsole(console_id)
+	if console == nil || cell_w <= 0 || cell_h <= 0 {
+		return false
+	}
+	rows := max(1, int(t.height / cell_h))
+	cols := max(1, int(t.width / cell_w))
+	applyConsoleSize(console, u16(rows), u16(cols))
+	console.origin_x = t.position_x + (t.width - f32(cols) * cell_w) * 0.5
+	console.origin_y = t.position_y + (t.height - f32(rows) * cell_h) * 0.5
 	return true
 }
 
@@ -263,7 +292,7 @@ ConsoleSetScrollOffset :: proc(console_id : u32, offset : u32) -> bool {
 		return false
 	}
 	max_offset := max(0, len(tb.lines) - int(console.rows))
-	console.scroll_offset = min(u32(max_offset), offset)
+	tb.scroll_offset = min(u32(max_offset), offset)
 	return true
 }
 
