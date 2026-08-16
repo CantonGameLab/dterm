@@ -3,6 +3,7 @@ package conpty
 import "core:fmt"
 import "core:c"
 import win "core:sys/windows"
+import mem "../memory"
 
 
 ConptyContext :: struct {
@@ -13,41 +14,28 @@ ConptyContext :: struct {
 	child_procid : win.DWORD,
 }
 
-// 静态数组,元素地址固定:读线程可长期持有 &conpty_contexts[i]
 MAX_CONPTY_SLOTS :: 16
 
-// id 约定:count 从 1 起,id 0 永不分配 → 0 = 空
-conpty_contexts_count : u32 = 1
+conpty_contexts : mem.GenArray(MAX_CONPTY_SLOTS, ConptyContext)
 
-conpty_contexts : [MAX_CONPTY_SLOTS]ConptyContext // hpc == nil = 空槽
-
-CreateConptyContext :: proc(size : win.COORD, cmd : string) -> (id : u32, ok : bool) {
-	for i in 1 ..< MAX_CONPTY_SLOTS {
-		if conpty_contexts[i].hpc != nil {
-			continue
-		}
-		if !createConptyContextValue(size, cmd, &conpty_contexts[i]) {
-			return 0, false
-		}
-		if u32(i) + 1 > conpty_contexts_count {
-			conpty_contexts_count = u32(i) + 1
-		}
-		return u32(i), true
+CreateConptyContext :: proc(size : win.COORD, cmd : string) -> (h : mem.Handle, ok : bool) {
+	ctx, created := createConptyContextValue(size, cmd)
+	if !created {
+		return {}, false
 	}
-	return 0, false
+	h = mem.Alloc(&conpty_contexts, ctx)
+	if h.id == 0 {
+		destroyConptyContext(&ctx)
+		return {}, false
+	}
+	return h, true
 }
 
-GetConptyContext :: proc(id : u32) -> ^ConptyContext {
-	if id == 0 || id >= MAX_CONPTY_SLOTS {
-		return nil
-	}
-	if conpty_contexts[id].hpc == nil {
-		return nil
-	}
-	return &conpty_contexts[id]
+GetConptyContext :: proc(h : mem.Handle) -> ^ConptyContext {
+	return mem.Get(&conpty_contexts, h)
 }
 
-createConptyContextValue :: proc(size: win.COORD, cmd: string, conpty_context: ^ConptyContext) -> (ok: bool = false) {
+createConptyContextValue :: proc(size: win.COORD, cmd: string) -> (ctx: ConptyContext, ok: bool = false) {
 	conpty_side_read : win.HANDLE // ConPTY 端读(子进程键盘事件)
 	main_side_write  : win.HANDLE // 我们写键盘输入
 	main_side_read   : win.HANDLE // 我们读输出
@@ -72,9 +60,9 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string, conpty_context: ^
 		return
 	}
 
-	conpty_context.hpc          = hpc
-	conpty_context.read_conpty  = main_side_read
-	conpty_context.write_conpty = main_side_write
+	ctx.hpc          = hpc
+	ctx.read_conpty  = main_side_read
+	ctx.write_conpty = main_side_write
 
 	start_info: STARTUPINFOEXW
 	start_info.StartupInfo.cb = size_of(start_info)
@@ -85,11 +73,11 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string, conpty_context: ^
 	heap := win.GetProcessHeap()
 	start_info.lpAttributeList = cast(LPPROC_THREAD_ATTRIBUTE_LIST) win.HeapAlloc(heap, 0, attr_size)
 	if start_info.lpAttributeList == nil {
-		destroyConptyContext(conpty_context)
+		destroyConptyContext(&ctx)
 		return
 	}
 	if !InitializeProcThreadAttributeList(start_info.lpAttributeList, 1, 0, &attr_size) {
-		destroyConptyContext(conpty_context)
+		destroyConptyContext(&ctx)
 		win.HeapFree(heap, 0, start_info.lpAttributeList)
 		return
 	}
@@ -102,7 +90,7 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string, conpty_context: ^
 		nil,
 		nil,
 	) {
-		destroyConptyContext(conpty_context)
+		destroyConptyContext(&ctx)
 		DeleteProcThreadAttributeList(start_info.lpAttributeList)
 		win.HeapFree(heap, 0, start_info.lpAttributeList)
 		return
@@ -120,24 +108,24 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string, conpty_context: ^
 		nil,
 		nil,
 		&start_info.StartupInfo,
-		&conpty_context.proc_info,
+		&ctx.proc_info,
 	) {
 		err := win.GetLastError()
 		fmt.eprintfln("CreateProcessW Failed: %v", err)
-		destroyConptyContext(conpty_context)
+		destroyConptyContext(&ctx)
 		DeleteProcThreadAttributeList(start_info.lpAttributeList)
 		win.HeapFree(heap, 0, start_info.lpAttributeList)
 		return
 	}
-	conpty_context.child_procid = conpty_context.proc_info.dwProcessId
+	ctx.child_procid = ctx.proc_info.dwProcessId
 
 	// hThread 不再需要;hProcess 保留用于等待/终止
-	win.CloseHandle(conpty_context.proc_info.hThread)
-	conpty_context.proc_info.hThread = win.INVALID_HANDLE_VALUE
+	win.CloseHandle(ctx.proc_info.hThread)
+	ctx.proc_info.hThread = win.INVALID_HANDLE_VALUE
 
 	DeleteProcThreadAttributeList(start_info.lpAttributeList)
 	win.HeapFree(heap, 0, start_info.lpAttributeList)
-	return true
+	return ctx, true
 }
 
 readConptyOutput :: proc(conpty_context: ^ConptyContext, buf: []byte) -> (n: u32, ok: bool) {
@@ -152,8 +140,8 @@ readConptyOutput :: proc(conpty_context: ^ConptyContext, buf: []byte) -> (n: u32
 }
 
 // 回显由终端负责;直接传 UTF-8 字节
-WriteConptyInput :: proc(id : u32, data: []byte) -> (n: u32, ok: bool) {
-	conpty_context := GetConptyContext(id)
+WriteConptyInput :: proc(h : mem.Handle, data: []byte) -> (n: u32, ok: bool) {
+	conpty_context := GetConptyContext(h)
 	if conpty_context == nil {
 		return 0, false
 	}
@@ -168,8 +156,8 @@ WriteConptyInput :: proc(id : u32, data: []byte) -> (n: u32, ok: bool) {
 }
 
 // 窗口缩放时:cols = 像素宽/单元宽,rows = 像素高/单元高
-Resize :: proc(id : u32, cols, rows: u16) -> bool {
-	conpty_context := GetConptyContext(id)
+Resize :: proc(h : mem.Handle, cols, rows: u16) -> bool {
+	conpty_context := GetConptyContext(h)
 	if conpty_context == nil {
 		return false
 	}
@@ -177,8 +165,8 @@ Resize :: proc(id : u32, cols, rows: u16) -> bool {
 	return hr == win.HRESULT(0)
 }
 
-IsChildAlive :: proc(id : u32) -> bool {
-	conpty_context := GetConptyContext(id)
+IsChildAlive :: proc(h : mem.Handle) -> bool {
+	conpty_context := GetConptyContext(h)
 	if conpty_context == nil {
 		return false
 	}
@@ -192,8 +180,13 @@ IsChildAlive :: proc(id : u32) -> bool {
 	return code == STILL_ACTIVE
 }
 
-DestroyConpty :: proc(id : u32) {
-	destroyConptyContext(GetConptyContext(id))
+DestroyConpty :: proc(h : mem.Handle) {
+	ctx := GetConptyContext(h)
+	if ctx == nil {
+		return
+	}
+	destroyConptyContext(ctx)
+	mem.Free(&conpty_contexts, h)
 }
 
 // 供创建失败回滚使用(槽位尚未登记完成)

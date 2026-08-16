@@ -6,6 +6,7 @@ package main
 
 import ct "conpty"
 import cv "canvas"
+import mem "memory"
 import "core:fmt"
 import "core:os"
 import "core:strings"
@@ -57,15 +58,15 @@ main :: proc() {
 }
 
 // 循环喂解析器直到消费完(ring 空时 UpdateConsole 立即返回)
-drain :: proc(console_id : u32) {
+drain :: proc(console_h : mem.Handle) {
 	for i in 0 ..< 64 {
-		cv.UpdateConsole(console_id)
+		cv.UpdateConsole(console_h)
 	}
 }
 
-dumpConsole :: proc(console_id : u32, path : string) {
-	console := cv.GetConsole(console_id)
-	tb := cv.GetTermBuffer(cv.ConsoleActiveTermBuffer(console_id))
+dumpConsole :: proc(console_h : mem.Handle, path : string) {
+	console := cv.GetConsole(console_h)
+	tb := cv.GetTermBuffer(cv.ConsoleActiveTermBuffer(console_h))
 	if console == nil || tb == nil {
 		fmt.eprintln("dump: console/tb nil")
 		return

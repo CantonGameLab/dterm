@@ -6,6 +6,7 @@ package render
 import s3 "vendor:sdl3"
 import gl "vendor:OpenGL"
 import fnt "../font"
+import mem "../memory"
 import "core:c"
 import "core:fmt"
 
@@ -180,8 +181,8 @@ DrawRect :: proc(x, y, w, h : f32, color : u32) {
 	pushQuad(white_tex, x, y, x + w, y + h, 0, 0, 1, 1, color)
 }
 
-// 文本,(x, y) = 基线位置;font_id 为 font 包槽位 id
-DrawText :: proc(font_id : u32, text : string, x, y : f32, color : u32) {
+// 文本,(x, y) = 基线位置;font_id 为 font 包槽位句柄
+DrawText :: proc(font_id : mem.Handle, text : string, x, y : f32, color : u32) {
 	tex := fnt.GetAtlasTexture(font_id)
 	m := fnt.GetMetrics(font_id)
 	pen_x, pen_y := x, y

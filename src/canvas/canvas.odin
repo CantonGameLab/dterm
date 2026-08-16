@@ -1,5 +1,7 @@
 package canvas
 
+import mem "../memory"
+
 MAX_TREE_NODE_SLOTS :: 2000
 ROOT_WINDOW_TREE_NODE_ID :: 1 // 硬编码根节点:transform = 窗口分辨率,position = {0,0}
 
@@ -28,7 +30,7 @@ Iterm :: struct {
 	layer : u16,
 	type : ItermType,
 
-	console_id : u32, // 本 pane 的屏幕 id;0 = 空
+	console_id : mem.Handle, // 本 pane 的屏幕句柄;0 = 空
 
 	using scale_transform : ScaleTransform,
 }
@@ -47,95 +49,74 @@ WindowTreeNode :: struct {
 	frame_width : u32, // 分割条像素宽
 	frame_color : u32,
 
-	parent_id : u32, // 0 = 无父(仅根)
+	parent_id : mem.Handle, // 0 = 无父(仅根)
 
-	left_son_id : u32, // left or up
-	right_son_id : u32, // right or down
+	left_son_id : mem.Handle, // left or up
+	right_son_id : mem.Handle, // right or down
 
 	split_factor : f32, // 左子树所占空间
 
 	split_type : SplitType,
 
 	is_leaf : bool,
-	in_use : bool, // 槽位占用标记;iterms 空合法,nil-ness 判空不可靠
 }
 
-window_tree_nodes : [MAX_TREE_NODE_SLOTS]WindowTreeNode
-window_tree_nodes_count : u32 = 1
+window_tree_nodes : mem.GenArray(MAX_TREE_NODE_SLOTS, WindowTreeNode)
 
 // 窗口分辨率(root 的初始尺寸;resize 时更新)
 Window_Width : u32 = 1920
 Window_Height : u32 = 1080
 
 InitWindowTree :: proc() {
-	window_tree_nodes[ROOT_WINDOW_TREE_NODE_ID] = WindowTreeNode {
+	mem.AllocAt(&window_tree_nodes, ROOT_WINDOW_TREE_NODE_ID, WindowTreeNode {
 		is_leaf = true,
-		in_use = true,
 		width = f32(Window_Width),
 		height = f32(Window_Height),
-	}
-	window_tree_nodes[ROOT_WINDOW_TREE_NODE_ID].iterms = make([dynamic]Iterm)
-	window_tree_nodes_count = ROOT_WINDOW_TREE_NODE_ID + 1
+	})
+	window_tree_nodes.data[ROOT_WINDOW_TREE_NODE_ID].iterms = make([dynamic]Iterm)
 }
 
-// 分配节点槽位(复用已释放);0 = 满
-CreateWindowTreeNode :: proc() -> (id : u32) {
-	for i in 1 ..< MAX_TREE_NODE_SLOTS {
-		if window_tree_nodes[i].in_use {
-			continue
-		}
-		window_tree_nodes[i] = WindowTreeNode { is_leaf = true, in_use = true }
-		if u32(i) + 1 > window_tree_nodes_count {
-			window_tree_nodes_count = u32(i) + 1
-		}
-		return u32(i)
-	}
-	return 0
+CreateWindowTreeNode :: proc() -> (h : mem.Handle) {
+	return mem.Alloc(&window_tree_nodes, WindowTreeNode { is_leaf = true })
 }
 
-GetWindowTreeNode :: proc(id : u32) -> ^WindowTreeNode {
-	if id >= MAX_TREE_NODE_SLOTS {
-		return nil
-	}
-	if !window_tree_nodes[id].in_use {
-		return nil
-	}
-	return &window_tree_nodes[id]
+GetWindowTreeNode :: proc(h : mem.Handle) -> ^WindowTreeNode {
+	return mem.Get(&window_tree_nodes, h)
 }
 
 // 树的根 = parent_id 为 0 的节点(分裂 root 后根迁移到新父)
-WindowTreeRoot :: proc() -> u32 {
+WindowTreeRoot :: proc() -> mem.Handle {
 	for i in 1 ..< MAX_TREE_NODE_SLOTS {
-		if window_tree_nodes[i].in_use && window_tree_nodes[i].parent_id == 0 {
-			return u32(i)
+		if mem.Alive(&window_tree_nodes, i) && window_tree_nodes.data[i].parent_id.id == 0 {
+			return mem.Handle { id = u32(i), generation = window_tree_nodes.generations[i] }
 		}
 	}
-	return 0
+	return {}
 }
 
 // ---------------------------------------------------------------------------
 // Iterm 数据操作(iterm 无独立 id,按节点内下标定位)
 // ---------------------------------------------------------------------------
 
-TreeNodeAddIterm :: proc(id : u32, type : ItermType, console_id : u32) -> (index : int, ok : bool) {
-	node := GetWindowTreeNode(id)
+TreeNodeAddIterm :: proc(h : mem.Handle, type : ItermType, console_h : mem.Handle) -> (index : int, ok : bool) {
+	node := GetWindowTreeNode(h)
 	if node == nil {
 		return 0, false
 	}
-	append(&node.iterms, Iterm { type = type, console_id = console_id })
+	append(&node.iterms, Iterm { type = type, console_id = console_h })
 	return len(node.iterms) - 1, true
 }
 
-TreeNodeRemoveIterm :: proc(id : u32, index : int) {
-	node := GetWindowTreeNode(id)
+TreeNodeRemoveIterm :: proc(h : mem.Handle, index : int) {
+	node := GetWindowTreeNode(h)
 	if node == nil || index < 0 || index >= len(node.iterms) {
 		return
 	}
 	ordered_remove(&node.iterms, index)
 }
 
-ItermGet :: proc(node_id : u32, index : int) -> ^Iterm {
-	node := GetWindowTreeNode(node_id)
+ItermGet :: proc(node_h : mem.Handle, index : int) -> ^Iterm {
+	node := GetWindowTreeNode(node_h)
 	if node == nil || index < 0 || index >= len(node.iterms) {
 		return nil
 	}
@@ -143,9 +124,9 @@ ItermGet :: proc(node_id : u32, index : int) -> ^Iterm {
 }
 
 // iterm 绝对矩形 = 节点几何 × scale(归一化)
-ItermAbsoluteTransform :: proc(node_id : u32, index : int) -> Transform {
-	node := GetWindowTreeNode(node_id)
-	it := ItermGet(node_id, index)
+ItermAbsoluteTransform :: proc(node_h : mem.Handle, index : int) -> Transform {
+	node := GetWindowTreeNode(node_h)
+	it := ItermGet(node_h, index)
 	if node == nil || it == nil {
 		return {}
 	}
@@ -162,21 +143,21 @@ ItermAbsoluteTransform :: proc(node_id : u32, index : int) -> Transform {
 // ---------------------------------------------------------------------------
 
 // 分裂:id 保留为左子树,新分配父节点接管其位置,右子为空叶子
-TreeNodeSplit :: proc(id : u32, split_type : SplitType, factor : f32) -> (parent_id, right_id : u32, ok : bool) {
-	node := GetWindowTreeNode(id)
+TreeNodeSplit :: proc(h : mem.Handle, split_type : SplitType, factor : f32) -> (parent_h, right_h : mem.Handle, ok : bool) {
+	node := GetWindowTreeNode(h)
 	if node == nil {
-		return 0, 0, false
+		return {}, {}, false
 	}
-	parent := CreateWindowTreeNode()
-	if parent == 0 {
-		return 0, 0, false
+	parent_h = CreateWindowTreeNode()
+	if parent_h.id == 0 {
+		return {}, {}, false
 	}
-	right := CreateWindowTreeNode()
-	if right == 0 {
-		window_tree_nodes[parent] = {}
-		return 0, 0, false
+	right_h = CreateWindowTreeNode()
+	if right_h.id == 0 {
+		mem.Free(&window_tree_nodes, parent_h)
+		return {}, {}, false
 	}
-	np := &window_tree_nodes[parent]
+	np := &window_tree_nodes.data[parent_h.id]
 	np.parent_id = node.parent_id // 接管 id 在父中的位置(根分裂则成为新根)
 	np.is_leaf = false
 	np.split_type = split_type
@@ -188,38 +169,38 @@ TreeNodeSplit :: proc(id : u32, split_type : SplitType, factor : f32) -> (parent
 	np.width = node.width
 	np.height = node.height
 	if gp := GetWindowTreeNode(np.parent_id); gp != nil {
-		if gp.left_son_id == id {
-			gp.left_son_id = parent
+		if gp.left_son_id == h {
+			gp.left_son_id = parent_h
 		}
-		if gp.right_son_id == id {
-			gp.right_son_id = parent
+		if gp.right_son_id == h {
+			gp.right_son_id = parent_h
 		}
 	}
-	node.parent_id = parent
-	np.left_son_id = id
-	np.right_son_id = right
-	window_tree_nodes[right].parent_id = parent
-	RecalculateTransforms(parent)
-	return parent, right, true
+	node.parent_id = parent_h
+	np.left_son_id = h
+	np.right_son_id = right_h
+	window_tree_nodes.data[right_h.id].parent_id = parent_h
+	RecalculateTransforms(parent_h)
+	return parent_h, right_h, true
 }
 
 // 摘除子树并释放节点槽(含 iterms);根不可删;父变单子时提升兄弟顶替,保持满二叉树
-TreeNodeRemove :: proc(id : u32) {
-	if id == 0 || id == WindowTreeRoot() {
+TreeNodeRemove :: proc(h : mem.Handle) {
+	if h.id == 0 || h == WindowTreeRoot() {
 		return
 	}
-	node := GetWindowTreeNode(id)
+	node := GetWindowTreeNode(h)
 	if node == nil {
 		return
 	}
 	pid := node.parent_id
 	parent := GetWindowTreeNode(pid)
 	if parent != nil {
-		if parent.left_son_id == id {
-			parent.left_son_id = 0
+		if parent.left_son_id == h {
+			parent.left_son_id = {}
 		}
-		if parent.right_son_id == id {
-			parent.right_son_id = 0
+		if parent.right_son_id == h {
+			parent.right_son_id = {}
 		}
 	}
 	if !node.is_leaf {
@@ -227,16 +208,16 @@ TreeNodeRemove :: proc(id : u32) {
 		TreeNodeRemove(node.right_son_id)
 	}
 	delete(node.iterms)
-	node^ = {}
+	mem.Free(&window_tree_nodes, h)
 	if parent == nil {
 		return
 	}
 	switch {
-	case parent.left_son_id != 0 && parent.right_son_id == 0:
+	case parent.left_son_id.id != 0 && parent.right_son_id.id == 0:
 		treeNodePromote(pid, parent.left_son_id)
-	case parent.left_son_id == 0 && parent.right_son_id != 0:
+	case parent.left_son_id.id == 0 && parent.right_son_id.id != 0:
 		treeNodePromote(pid, parent.right_son_id)
-	case parent.left_son_id == 0 && parent.right_son_id == 0:
+	case parent.left_son_id.id == 0 && parent.right_son_id.id == 0:
 		parent.is_leaf = true
 	case:
 		RecalculateTransforms(pid)
@@ -244,9 +225,9 @@ TreeNodeRemove :: proc(id : u32) {
 }
 
 // son 顶替 parent 的位置(几何继承,由上层重算覆盖)
-treeNodePromote :: proc(parent_id, son_id : u32) {
-	p := GetWindowTreeNode(parent_id)
-	son := GetWindowTreeNode(son_id)
+treeNodePromote :: proc(parent_h, son_h : mem.Handle) {
+	p := GetWindowTreeNode(parent_h)
+	son := GetWindowTreeNode(son_h)
 	if p == nil || son == nil {
 		return
 	}
@@ -257,83 +238,84 @@ treeNodePromote :: proc(parent_id, son_id : u32) {
 	son.width = p.width
 	son.height = p.height
 	if gp := GetWindowTreeNode(gpid); gp != nil {
-		if gp.left_son_id == parent_id {
-			gp.left_son_id = son_id
+		if gp.left_son_id == parent_h {
+			gp.left_son_id = son_h
 		}
-		if gp.right_son_id == parent_id {
-			gp.right_son_id = son_id
+		if gp.right_son_id == parent_h {
+			gp.right_son_id = son_h
 		}
 	}
 	delete(p.iterms)
-	p^ = {}
-	if gpid != 0 {
+	mem.Free(&window_tree_nodes, parent_h)
+	if gpid.id != 0 {
 		RecalculateTransforms(gpid)
 	}
 	// gpid == 0:son 成为新根,几何已继承
 }
 
-TreeNodeSetSplitFactor :: proc(id : u32, factor : f32) -> bool {
-	node := GetWindowTreeNode(id)
+TreeNodeSetSplitFactor :: proc(h : mem.Handle, factor : f32) -> bool {
+	node := GetWindowTreeNode(h)
 	if node == nil || node.is_leaf {
 		return false
 	}
 	node.split_factor = max(0.05, min(0.95, factor))
-	RecalculateTransforms(id)
+	RecalculateTransforms(h)
 	return true
 }
 
-TreeNodeSetSplitType :: proc(id : u32, split_type : SplitType) -> bool {
-	node := GetWindowTreeNode(id)
+TreeNodeSetSplitType :: proc(h : mem.Handle, split_type : SplitType) -> bool {
+	node := GetWindowTreeNode(h)
 	if node == nil || node.is_leaf {
 		return false
 	}
 	node.split_type = split_type
-	RecalculateTransforms(id)
+	RecalculateTransforms(h)
 	return true
 }
 
 // 设子节点并同步父引用;son 是 id 的祖先时拒绝(成环)
-TreeNodeSetLeftSon :: proc(id, son_id : u32) -> bool {
-	return treeNodeSetSon(id, son_id, true)
+TreeNodeSetLeftSon :: proc(h, son_h : mem.Handle) -> bool {
+	return treeNodeSetSon(h, son_h, true)
 }
 
-TreeNodeSetRightSon :: proc(id, son_id : u32) -> bool {
-	return treeNodeSetSon(id, son_id, false)
+TreeNodeSetRightSon :: proc(h, son_h : mem.Handle) -> bool {
+	return treeNodeSetSon(h, son_h, false)
 }
 
-treeNodeSetSon :: proc(id, son_id : u32, is_left : bool) -> bool {
-	node := GetWindowTreeNode(id)
-	if node == nil || son_id == id {
+treeNodeSetSon :: proc(h, son_h : mem.Handle, is_left : bool) -> bool {
+	node := GetWindowTreeNode(h)
+	if node == nil || son_h == h {
 		return false
 	}
-	if son_id != 0 {
-		son := GetWindowTreeNode(son_id)
+	if son_h.id != 0 {
+		son := GetWindowTreeNode(son_h)
 		if son == nil {
 			return false
 		}
-		for p := node.parent_id; p != 0; p = window_tree_nodes[p].parent_id {
-			if p == son_id {
+		for p := node.parent_id; p.id != 0; p = window_tree_nodes.data[p.id].parent_id {
+			if p == son_h {
 				return false // son 在 id 的祖先链上,挂上去即成环
 			}
 		}
-		if old := window_tree_nodes[son_id].parent_id; old != 0 && old != id {
-			op := &window_tree_nodes[old]
-			if op.left_son_id == son_id {
-				op.left_son_id = 0
-			}
-			if op.right_son_id == son_id {
-				op.right_son_id = 0
+		if old := son.parent_id; old.id != 0 && old != h {
+			if op := GetWindowTreeNode(old); op != nil {
+				if op.left_son_id == son_h {
+					op.left_son_id = {}
+				}
+				if op.right_son_id == son_h {
+					op.right_son_id = {}
+				}
 			}
 		}
-		window_tree_nodes[son_id].parent_id = id
+		son.parent_id = h
 	}
 	if is_left {
-		node.left_son_id = son_id
+		node.left_son_id = son_h
 	} else {
-		node.right_son_id = son_id
+		node.right_son_id = son_h
 	}
-	node.is_leaf = node.left_son_id == 0 && node.right_son_id == 0
-	RecalculateTransforms(id)
+	node.is_leaf = node.left_son_id.id == 0 && node.right_son_id.id == 0
+	RecalculateTransforms(h)
 	return true
 }
 
@@ -357,8 +339,8 @@ WindowTreeSetRootSize :: proc(width, height : u32) {
 }
 
 // 按 split_factor / split_type / frame_width 递归划分子节点几何
-RecalculateTransforms :: proc(id : u32) {
-	node := GetWindowTreeNode(id)
+RecalculateTransforms :: proc(h : mem.Handle) {
+	node := GetWindowTreeNode(h)
 	if node == nil || node.is_leaf {
 		return
 	}

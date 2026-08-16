@@ -1,7 +1,7 @@
 // 字体系统:rune → 可渲染字形(灰度位图入 GL 图集 + 度量)。
 // 对外 5 个函数:LoadFont / DestroyFont / GetGlyph / GetMetrics / GetAtlasTexture。
 // 懒光栅化:字形首次用到才 stbtt 渲染,入图集缓存;主字体缺字自动走中文 fallback(同一图集)。
-// 槽位数组 + id 句柄:count 从 1 起,id 0 = 空;跨层一律传 id,GetFont(id) 拿指针。
+// 槽位数组 + id 句柄:count 从 1 起,id 0 = 空;跨层一律传 Handle,GetFont(h) 拿指针。
 package font
 
 import stbtt "vendor:stb/truetype"
@@ -9,6 +9,7 @@ import gl "vendor:OpenGL"
 import "core:c"
 import "core:os"
 import "core:math"
+import mem "../memory"
 
 // ---------------------------------------------------------------------------
 // 对外数据
@@ -72,7 +73,6 @@ Atlas :: struct {
 }
 
 Font :: struct {
-	in_use : bool, // 槽位占用标记
 	faces : [MAX_FACES]Face,
 	face_count : u32,
 	antialias : u8, // 光栅化超采样倍数 1-3;相对静止,LoadFont 时一次设定
@@ -83,110 +83,91 @@ Font :: struct {
 	atlas : Atlas,
 }
 
-fonts : [MAX_FONT_SLOTS]Font
-fonts_count : u32 = 1
+fonts : mem.GenArray(MAX_FONT_SLOTS, Font)
 
 // ---------------------------------------------------------------------------
 // 对外接口
 // ---------------------------------------------------------------------------
 
-GetFont :: proc(id : u32) -> ^Font {
-	if id == 0 || id >= MAX_FONT_SLOTS {
-		return nil
-	}
-	if !fonts[id].in_use {
-		return nil
-	}
-	return &fonts[id]
+GetFont :: proc(h : mem.Handle) -> ^Font {
+	return mem.Get(&fonts, h)
 }
 
 // antialias:光栅化超采样倍数(1 = 关,2 = 2x2 超采样);相对静止,启动时一次设定
-LoadFont :: proc(path : string, size : f32, antialias : u8 = 2) -> (id : u32, ok : bool) {
+LoadFont :: proc(path : string, size : f32, antialias : u8 = 2) -> (h : mem.Handle, ok : bool) {
 	if size <= 0 {
-		return 0, false
+		return {}, false
 	}
-	for i in 1 ..< MAX_FONT_SLOTS {
-		if fonts[i].in_use {
-			continue
-		}
-		font := &fonts[i]
-		font^ = {}
-		font.in_use = true
-		font.antialias = max(1, min(3, antialias))
-		font.slots = make([dynamic]GlyphSlot, 64) // 哈希桶,装 0.75 后翻倍
-		face, fok := faceLoad(path, size)
-		if !fok {
-			delete(font.slots)
-			font^ = {}
-			return 0, false
-		}
-		font.faces[0] = face
-		font.face_count = 1
+	font := Font { antialias = max(1, min(3, antialias)) }
+	font.slots = make([dynamic]GlyphSlot, 64) // 哈希桶,装 0.75 后翻倍
+	face, fok := faceLoad(path, size)
+	if !fok {
+		delete(font.slots)
+		return {}, false
+	}
+	font.faces[0] = face
+	font.face_count = 1
 
-		// 主字体无 CJK 字形 → 附系统中文字体
-		if stbtt.FindGlyphIndex(&font.faces[0].info, '你') == 0 {
-			for fb_path in FALLBACK_FONTS {
-				if fb, ffok := faceLoad(fb_path, size); ffok {
-					font.faces[1] = fb
-					font.face_count = 2
-					break
-				}
+	// 主字体无 CJK 字形 → 附系统中文字体
+	if stbtt.FindGlyphIndex(&font.faces[0].info, '你') == 0 {
+		for fb_path in FALLBACK_FONTS {
+			if fb, ffok := faceLoad(fb_path, size); ffok {
+				font.faces[1] = fb
+				font.face_count = 2
+				break
 			}
 		}
-
-		// 格子度量:同字号下各 face 同 scale,取主 face
-		f := &font.faces[0]
-		ascent, descent, line_gap : c.int
-		stbtt.GetFontVMetrics(&f.info, &ascent, &descent, &line_gap)
-		font.cell_height = math.ceil((f32(ascent) - f32(descent) + f32(line_gap)) * f.scale)
-		font.ascent = f32(ascent) * f.scale
-		advance : c.int
-		stbtt.GetCodepointHMetrics(&f.info, 'M', &advance, nil)
-		font.cell_width = math.ceil(f32(advance) * f.scale)
-
-		atlasInit(&font.atlas)
-		if u32(i) + 1 > fonts_count {
-			fonts_count = u32(i) + 1
-		}
-		return u32(i), true
 	}
-	return 0, false
+
+	// 格子度量:同字号下各 face 同 scale,取主 face
+	f := &font.faces[0]
+	ascent, descent, line_gap : c.int
+	stbtt.GetFontVMetrics(&f.info, &ascent, &descent, &line_gap)
+	font.cell_height = math.ceil((f32(ascent) - f32(descent) + f32(line_gap)) * f.scale)
+	font.ascent = f32(ascent) * f.scale
+	advance : c.int
+	stbtt.GetCodepointHMetrics(&f.info, 'M', &advance, nil)
+	font.cell_width = math.ceil(f32(advance) * f.scale)
+
+	atlasInit(&font.atlas)
+
+	h = mem.Alloc(&fonts, font)
+	if h.id == 0 {
+		fontFree(&font)
+		return {}, false
+	}
+	return h, true
 }
 
-DestroyFont :: proc(id : u32) {
-	font := GetFont(id)
+DestroyFont :: proc(h : mem.Handle) {
+	font := GetFont(h)
 	if font == nil {
 		return
 	}
-	for i in 0 ..< int(font.face_count) {
-		delete(font.faces[i].data)
-	}
-	delete(font.slots)
-	delete(font.atlas.pixels)
-	gl.DeleteTextures(1, &font.atlas.texture)
-	font^ = {}
+	fontFree(font)
+	mem.Free(&fonts, h)
 }
 
 // 查字形:缓存命中直接返回;未命中则光栅化入图集。false = 所有 face 都无此字形
-GetGlyph :: proc(id : u32, cp : rune) -> (Glyph, bool) {
-	if GetFont(id) == nil {
+GetGlyph :: proc(h : mem.Handle, cp : rune) -> (Glyph, bool) {
+	if GetFont(h) == nil {
 		return {}, false
 	}
-	if slot := slotFind(id, cp); slot != nil {
+	if slot := slotFind(h, cp); slot != nil {
 		return glyphFromSlot(slot), true
 	}
-	if !glyphRasterize(id, cp) {
+	if !glyphRasterize(h, cp) {
 		return {}, false
 	}
-	slot := slotFind(id, cp)
+	slot := slotFind(h, cp)
 	if slot == nil {
 		return {}, false
 	}
 	return glyphFromSlot(slot), true
 }
 
-GetMetrics :: proc(id : u32) -> Metrics {
-	font := GetFont(id)
+GetMetrics :: proc(h : mem.Handle) -> Metrics {
+	font := GetFont(h)
 	if font == nil {
 		return {}
 	}
@@ -197,8 +178,8 @@ GetMetrics :: proc(id : u32) -> Metrics {
 	}
 }
 
-GetAtlasTexture :: proc(id : u32) -> u32 {
-	font := GetFont(id)
+GetAtlasTexture :: proc(h : mem.Handle) -> u32 {
+	font := GetFont(h)
 	if font == nil {
 		return 0
 	}
@@ -224,12 +205,22 @@ faceLoad :: proc(path : string, size : f32) -> (Face, bool) {
 	return face, true
 }
 
+// 释放 Font 值持有的资源(槽位释放与创建失败回滚共用)
+fontFree :: proc(font : ^Font) {
+	for i in 0 ..< int(font.face_count) {
+		delete(font.faces[i].data)
+	}
+	delete(font.slots)
+	delete(font.atlas.pixels)
+	gl.DeleteTextures(1, &font.atlas.texture)
+}
+
 // ---------------------------------------------------------------------------
 // 缓存槽(开放寻址,线性探测)
 // ---------------------------------------------------------------------------
 
-slotFind :: proc(font_id : u32, cp : rune) -> ^GlyphSlot {
-	font := GetFont(font_id)
+slotFind :: proc(font_h : mem.Handle, cp : rune) -> ^GlyphSlot {
+	font := GetFont(font_h)
 	if font == nil {
 		return nil
 	}
@@ -250,13 +241,13 @@ slotFind :: proc(font_id : u32, cp : rune) -> ^GlyphSlot {
 	}
 }
 
-slotInsert :: proc(font_id : u32, slot : GlyphSlot) -> bool {
-	font := GetFont(font_id)
+slotInsert :: proc(font_h : mem.Handle, slot : GlyphSlot) -> bool {
+	font := GetFont(font_h)
 	if font == nil || len(font.slots) == 0 {
 		return false
 	}
 	if int(font.slot_count) + 1 > int(f32(len(font.slots)) * SLOT_LOAD_FACTOR) {
-		if !slotGrow(font_id) {
+		if !slotGrow(font_h) {
 			return false
 		}
 	}
@@ -272,8 +263,8 @@ slotInsert :: proc(font_id : u32, slot : GlyphSlot) -> bool {
 	}
 }
 
-slotGrow :: proc(font_id : u32) -> bool {
-	font := GetFont(font_id)
+slotGrow :: proc(font_h : mem.Handle) -> bool {
+	font := GetFont(font_h)
 	if font == nil {
 		return false
 	}
@@ -315,8 +306,8 @@ glyphFromSlot :: proc(slot : ^GlyphSlot) -> Glyph {
 // ---------------------------------------------------------------------------
 
 // 选 face:主字体无此字形(notdef)则 fallback
-glyphFaceIndex :: proc(font_id : u32, cp : rune) -> (index : int, ok : bool) {
-	font := GetFont(font_id)
+glyphFaceIndex :: proc(font_h : mem.Handle, cp : rune) -> (index : int, ok : bool) {
+	font := GetFont(font_h)
 	if font == nil {
 		return 0, false
 	}
@@ -328,12 +319,12 @@ glyphFaceIndex :: proc(font_id : u32, cp : rune) -> (index : int, ok : bool) {
 	return 0, false
 }
 
-glyphRasterize :: proc(font_id : u32, cp : rune) -> bool {
-	font := GetFont(font_id)
+glyphRasterize :: proc(font_h : mem.Handle, cp : rune) -> bool {
+	font := GetFont(font_h)
 	if font == nil {
 		return false
 	}
-	face_idx, ok := glyphFaceIndex(font_id, cp)
+	face_idx, ok := glyphFaceIndex(font_h, cp)
 	if !ok {
 		return false
 	}
@@ -349,7 +340,7 @@ glyphRasterize :: proc(font_id : u32, cp : rune) -> bool {
 
 	x, y, alloc_ok := atlasAlloc(&font.atlas, u32(w) + 2 * ATLAS_PAD, u32(h) + 2 * ATLAS_PAD)
 	if !alloc_ok {
-		atlasGrow(font_id) // 图集满 → 扩容并重放全部缓存字形
+		atlasGrow(font_h) // 图集满 → 扩容并重放全部缓存字形
 		x, y, alloc_ok = atlasAlloc(&font.atlas, u32(w) + 2 * ATLAS_PAD, u32(h) + 2 * ATLAS_PAD)
 		if !alloc_ok {
 			return false
@@ -361,7 +352,7 @@ glyphRasterize :: proc(font_id : u32, cp : rune) -> bool {
 	stbtt.MakeCodepointBitmapSubpixelPrefilter(&face.info, cast([^]byte)&font.atlas.pixels[row_start], w, h, c.int(font.atlas.width), face.scale, face.scale, 0, 0, c.int(font.antialias), c.int(font.antialias), &sub_x, &sub_y, cp)
 	atlasUpload(&font.atlas, x, y, u32(w) + 2 * ATLAS_PAD, u32(h) + 2 * ATLAS_PAD)
 
-	return slotInsert(font_id, GlyphSlot {
+	return slotInsert(font_h, GlyphSlot {
 		cp = cp,
 		face_index = u8(face_idx),
 		w = u16(w), h = u16(h),
@@ -416,8 +407,8 @@ atlasAlloc :: proc(a : ^Atlas, w, h : u32) -> (x, y : u32, ok : bool) {
 }
 
 // 图集满:尺寸翻倍,重画全部已缓存字形(一次性冷启动成本)
-atlasGrow :: proc(font_id : u32) {
-	font := GetFont(font_id)
+atlasGrow :: proc(font_h : mem.Handle) {
+	font := GetFont(font_h)
 	if font == nil {
 		return
 	}

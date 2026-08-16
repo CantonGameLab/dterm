@@ -1,6 +1,7 @@
 package canvas
 
 import ct "../conpty"
+import mem "../memory"
 import "core:fmt"
 
 // VT 解析器:字节流 → 状态机 → 操作 Console。
@@ -28,17 +29,17 @@ VtState :: struct {
 	scroll_top, scroll_bottom : u16,
 	autowrap : bool,
 	cursor_visible : bool,
-	alt_term_buffer_id : u32, // 0 = 未创建
+	alt_term_buffer_id : mem.Handle, // 0 = 未创建
 }
 
 update_scratch : [64 * 1024]byte // 主循环单线程,包级复用
 
-UpdateConsole :: proc(id : u32) {
-	console := GetConsole(id)
+UpdateConsole :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
-	data := ct.GetReadWriteData(id)
+	data := ct.GetReadWriteData(console.conpty_handle)
 	if data == nil {
 		return
 	}
@@ -46,11 +47,11 @@ UpdateConsole :: proc(id : u32) {
 	if n <= 0 {
 		return
 	}
-	vtFeed(id, update_scratch[:n])
+	vtFeed(console_h, update_scratch[:n])
 }
 
-vtFeed :: proc(console_id : u32, data : []byte) {
-	console := GetConsole(console_id)
+vtFeed :: proc(console_h : mem.Handle, data : []byte) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -62,7 +63,7 @@ vtFeed :: proc(console_id : u32, data : []byte) {
 				vt.utf8_pending[vt.utf8_pending_len] = b
 				vt.utf8_pending_len += 1
 				if vt.utf8_pending_len >= vtUtf8Len(vt.utf8_pending[0]) {
-					vtPrint(console_id, vtDecodeRune(vt.utf8_pending[:vt.utf8_pending_len]))
+					vtPrint(console_h, vtDecodeRune(vt.utf8_pending[:vt.utf8_pending_len]))
 					vt.utf8_pending_len = 0
 				}
 				continue
@@ -71,9 +72,9 @@ vtFeed :: proc(console_id : u32, data : []byte) {
 			case b == 0x1B:
 				vt.state = .Esc
 			case b < 0x20 || b == 0x7F:
-				vtHandleC0(console_id, b)
+				vtHandleC0(console_h, b)
 			case b < 0x80:
-				vtPrint(console_id, rune(b))
+				vtPrint(console_h, rune(b))
 			case b >= 0xC0:
 				vt.utf8_pending[0] = b
 				vt.utf8_pending_len = 1
@@ -117,7 +118,7 @@ vtFeed :: proc(console_id : u32, data : []byte) {
 					vt.params[vt.param_count - 1] = 0
 				}
 			case b >= 0x40 && b <= 0x7E:
-				vtCsiDispatch(console_id, b)
+				vtCsiDispatch(console_h, b)
 				vt.state = .Normal
 			case:
 				vt.state = .Normal
@@ -140,8 +141,8 @@ vtFeed :: proc(console_id : u32, data : []byte) {
 // C0
 // ---------------------------------------------------------------------------
 
-vtHandleC0 :: proc(console_id : u32, b : u8) {
-	console := GetConsole(console_id)
+vtHandleC0 :: proc(console_h : mem.Handle, b : u8) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -155,14 +156,14 @@ vtHandleC0 :: proc(console_id : u32, b : u8) {
 		col := (int(console.cursor_col) / 8 + 1) * 8
 		console.cursor_col = min(u16(col), console.cols - 1)
 	case 0x0A, 0x0B, 0x0C: // LF/VT/FF
-		vtLf(console_id)
+		vtLf(console_h)
 	case 0x0D: // CR
 		console.cursor_col = 0
 	}
 }
 
-vtLf :: proc(console_id : u32) {
-	console := GetConsole(console_id)
+vtLf :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -174,13 +175,13 @@ vtLf :: proc(console_id : u32) {
 		console.cursor_row += 1
 		return
 	}
-	vtScrollUp(console_id)
+	vtScrollUp(console_h)
 }
 
 // 滚动区上移一行。全屏:行数组尾部增长,顶行滚进历史;
 // 局部:顶行丢弃,底行补空行。
-vtScrollUp :: proc(console_id : u32) {
-	console := GetConsole(console_id)
+vtScrollUp :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -192,7 +193,7 @@ vtScrollUp :: proc(console_id : u32) {
 	if top == 0 && bottom == int(console.rows) - 1 {
 		append(&tb.lines, Line{})
 		console.cursor_row += 1
-		trimScrollback(console_id)
+		trimScrollback(console_h)
 		return
 	}
 	for len(tb.lines) <= bottom {
@@ -203,8 +204,8 @@ vtScrollUp :: proc(console_id : u32) {
 	insertLine(&tb.lines, bottom)
 }
 
-vtScrollDown :: proc(console_id : u32) {
-	console := GetConsole(console_id)
+vtScrollDown :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -229,8 +230,8 @@ insertLine :: proc(lines : ^[dynamic]Line, index : int) {
 }
 
 // 只在全屏滚动路径调用;裁掉最老行
-trimScrollback :: proc(console_id : u32) {
-	console := GetConsole(console_id)
+trimScrollback :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -251,12 +252,12 @@ trimScrollback :: proc(console_id : u32) {
 	console.vt.scroll_top, console.vt.scroll_bottom = 0, console.rows - 1
 }
 
-vtPrint :: proc(console_id : u32, cp : rune) {
-	console := GetConsole(console_id)
+vtPrint :: proc(console_h : mem.Handle, cp : rune) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
-	ConsoleWriteRune(console_id, cp, console.vt.style)
+	ConsoleWriteRune(console_h, cp, console.vt.style)
 }
 
 vtUtf8Len :: proc(b : u8) -> int {
@@ -284,8 +285,8 @@ vtDecodeRune :: proc(bytes : []u8) -> rune {
 // CSI
 // ---------------------------------------------------------------------------
 
-vtCsiDispatch :: proc(console_id : u32, final : u8) {
-	console := GetConsole(console_id)
+vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -316,13 +317,13 @@ vtCsiDispatch :: proc(console_id : u32, final : u8) {
 	case 'G': // CHA
 		console.cursor_col = u16(clamp(p0 - 1, 0, int(console.cols) - 1))
 	case 'J': // ED
-		vtEraseInDisplay(console_id, p0)
+		vtEraseInDisplay(console_h, p0)
 	case 'K': // EL
-		vtEraseInLine(console_id, p0)
+		vtEraseInLine(console_h, p0)
 	case 'm': // SGR
-		vtSgr(console_id)
+		vtSgr(console_h)
 	case 'h', 'l': // DEC 模式
-		vtSetMode(console_id, final == 'h')
+		vtSetMode(console_h, final == 'h')
 	case 'r': // 滚动区
 		top := clamp(p0 - 1, 0, int(console.rows) - 1)
 		bottom := int(console.rows) - 1
@@ -336,21 +337,21 @@ vtCsiDispatch :: proc(console_id : u32, final : u8) {
 		console.cursor_row, console.cursor_col = vt.saved_cursor_row, vt.saved_cursor_col
 	case 'S': // SU
 		for i in 0 ..< max(1, p0) {
-			vtScrollUp(console_id)
+			vtScrollUp(console_h)
 		}
 	case 'T': // SD
 		for i in 0 ..< max(1, p0) {
-			vtScrollDown(console_id)
+			vtScrollDown(console_h)
 		}
 	case 'n': // DSR
 		if p0 == 6 {
-			vtReplyCursor(console_id)
+			vtReplyCursor(console_h)
 		}
 	}
 }
 
-vtSetMode :: proc(console_id : u32, set : bool) {
-	console := GetConsole(console_id)
+vtSetMode :: proc(console_h : mem.Handle, set : bool) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -364,14 +365,14 @@ vtSetMode :: proc(console_id : u32, set : bool) {
 	case 25:
 		vt.cursor_visible = set
 	case 1049:
-		vtAltScreen(console_id, set)
+		vtAltScreen(console_h, set)
 	case 2026: // 同步输出,全量重建天然满足
 	}
 }
 
 // 进:存光标 + 切到交替屏(新建空页);出:切回主屏 + 销毁交替页 + 取光标
-vtAltScreen :: proc(console_id : u32, enter : bool) {
-	console := GetConsole(console_id)
+vtAltScreen :: proc(console_h : mem.Handle, enter : bool) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -379,31 +380,31 @@ vtAltScreen :: proc(console_id : u32, enter : bool) {
 	if enter {
 		vt.saved_cursor_row, vt.saved_cursor_col = console.cursor_row, console.cursor_col
 		alt := vt.alt_term_buffer_id
-		if alt == 0 {
+		if alt.id == 0 {
 			alt, _ = CreateTermBuffer()
-			ConsoleAttachTermBuffer(console_id, alt)
+			ConsoleAttachTermBuffer(console_h, alt)
 			vt.alt_term_buffer_id = alt
 		} else {
-			ConsoleActivateTermBuffer(console_id, alt)
+			ConsoleActivateTermBuffer(console_h, alt)
 		}
 		TermBufferClear(alt)
 		console.cursor_row, console.cursor_col = 0, 0
 	} else {
 		alt := vt.alt_term_buffer_id
 		if console.term_buffer_count > 0 {
-			ConsoleActivateTermBuffer(console_id, console.term_buffer_ids[0])
+			ConsoleActivateTermBuffer(console_h, console.term_buffer_ids[0])
 		}
-		if alt != 0 {
+		if alt.id != 0 {
 			DestroyTermBuffer(alt)
-			vt.alt_term_buffer_id = 0
+			vt.alt_term_buffer_id = {}
 		}
 		console.cursor_row, console.cursor_col = vt.saved_cursor_row, vt.saved_cursor_col
 	}
 }
 
 // mode:0 到行尾 / 1 到行首 / 2 整行
-vtEraseInLine :: proc(console_id : u32, mode : int) {
-	console := GetConsole(console_id)
+vtEraseInLine :: proc(console_h : mem.Handle, mode : int) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -435,8 +436,8 @@ vtEraseInLine :: proc(console_id : u32, mode : int) {
 }
 
 // mode:0 光标到屏尾 / 1 屏头到光标 / 2 可视区 / 3 全部 + 历史
-vtEraseInDisplay :: proc(console_id : u32, mode : int) {
-	console := GetConsole(console_id)
+vtEraseInDisplay :: proc(console_h : mem.Handle, mode : int) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -446,27 +447,27 @@ vtEraseInDisplay :: proc(console_id : u32, mode : int) {
 	}
 	switch mode {
 	case 0:
-		vtEraseInLine(console_id, 0)
+		vtEraseInLine(console_h, 0)
 		for row in int(console.cursor_row) + 1 ..< len(tb.lines) {
-			vtClearLineAll(console_id, row)
+			vtClearLineAll(console_h, row)
 		}
 	case 1:
 		for row in 0 ..< int(console.cursor_row) {
-			vtClearLineAll(console_id, row)
+			vtClearLineAll(console_h, row)
 		}
-		vtEraseInLine(console_id, 1)
+		vtEraseInLine(console_h, 1)
 	case 2:
 		start := max(0, len(tb.lines) - int(console.rows))
 		for row in start ..< len(tb.lines) {
-			vtClearLineAll(console_id, row)
+			vtClearLineAll(console_h, row)
 		}
 	case 3:
 		TermBufferClear(console.active_term_buffer_id)
 	}
 }
 
-vtClearLineAll :: proc(console_id : u32, row : int) {
-	console := GetConsole(console_id)
+vtClearLineAll :: proc(console_h : mem.Handle, row : int) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -494,8 +495,8 @@ ANSI16 : [16]u32 = {
 	0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
 }
 
-vtSgr :: proc(console_id : u32) {
-	console := GetConsole(console_id)
+vtSgr :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
@@ -561,16 +562,16 @@ ansiCubeLevel :: proc(v : int) -> u32 {
 }
 
 // ESC[row;colR 应答光标位置(程序阻塞等这个)
-vtReplyCursor :: proc(console_id : u32) {
-	console := GetConsole(console_id)
+vtReplyCursor :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
 	msg := fmt.tprintf("\x1b[%d;%dR", int(console.cursor_row) + 1, int(console.cursor_col) + 1)
-	ct.WriteConptyInput(console_id, transmute([]byte)msg)
+	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)msg)
 }
 
 // 调试/测试:直接喂字节给解析器,绕过 ConPTY
-ConsoleFeed :: proc(console_id : u32, data : []byte) {
-	vtFeed(console_id, data)
+ConsoleFeed :: proc(console_h : mem.Handle, data : []byte) {
+	vtFeed(console_h, data)
 }

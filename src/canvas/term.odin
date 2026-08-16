@@ -1,11 +1,12 @@
 package canvas
 
 import ct "../conpty"
+import mem "../memory"
 
 // 双层屏幕模型:
 //   内容层 TermBuffer:一"页"的所有行(含滚动历史)。
 //   视口层 Console:行列、光标、登记/激活的页、滚动偏移、VT 状态。
-//   Console 与 ConptyContext 同 id 同步;函数间传递一律用 id,内部自查槽位。
+//   Console 与 ConptyContext 通过 conpty_handle 绑定;函数间传递一律用 Handle,内部自查槽位。
 //   渲染契约:visible_top = max(0, len(lines) - rows - tb.scroll_offset) // scroll_offset 随 buffer
 //            屏幕第 r 行 ↔ lines[visible_top + r];光标屏幕位置 = cursor_row - visible_top
 //            第 r 行第 c 列格子左上角像素 = (origin_x + c*cell_w, origin_y + r*cell_h);cell 来自 font 度量
@@ -37,49 +38,37 @@ MAX_SCROLLBACK_LINES :: 10000
 TRIM_SLACK :: 512 // 超上限这么多行才裁,避免频繁搬行
 
 TermBuffer :: struct {
-	lines : [dynamic]Line, // nil = 空槽
+	lines : [dynamic]Line,
 	scroll_offset : u32,
 }
 
-// id 约定:count 从 1 起,id 0 永不分配 → 0 = 空/null
-term_buffers_count : u32 = 1
-term_buffers : [MAX_TERM_BUFFER_SLOTS]TermBuffer
+term_buffers : mem.GenArray(MAX_TERM_BUFFER_SLOTS, TermBuffer)
 
-CreateTermBuffer :: proc() -> (id : u32, ok : bool) {
-	for i in 1 ..< MAX_TERM_BUFFER_SLOTS {
-		if term_buffers[i].lines != nil {
-			continue
-		}
-		term_buffers[i].lines = make([dynamic]Line)
-		append(&term_buffers[i].lines, Line{}) // make 后 data 仍为 nil,append 占位让判空可靠
-		if u32(i) + 1 > term_buffers_count {
-			term_buffers_count = u32(i) + 1
-		}
-		return u32(i), true
+CreateTermBuffer :: proc() -> (h : mem.Handle, ok : bool) {
+	lines := make([dynamic]Line)
+	append(&lines, Line{}) // 占位首行
+	h = mem.Alloc(&term_buffers, TermBuffer { lines = lines })
+	if h.id == 0 {
+		delete(lines)
+		return {}, false
 	}
-	return 0, false
+	return h, true
 }
 
-GetTermBuffer :: proc(id : u32) -> ^TermBuffer {
-	if id == 0 || id >= MAX_TERM_BUFFER_SLOTS {
-		return nil
-	}
-	if term_buffers[id].lines == nil {
-		return nil
-	}
-	return &term_buffers[id]
+GetTermBuffer :: proc(h : mem.Handle) -> ^TermBuffer {
+	return mem.Get(&term_buffers, h)
 }
 
-TermBufferLineCount :: proc(id : u32) -> int {
-	tb := GetTermBuffer(id)
+TermBufferLineCount :: proc(h : mem.Handle) -> int {
+	tb := GetTermBuffer(h)
 	if tb == nil {
 		return 0
 	}
 	return len(tb.lines)
 }
 
-DestroyTermBuffer :: proc(id : u32) {
-	tb := GetTermBuffer(id)
+DestroyTermBuffer :: proc(h : mem.Handle) {
+	tb := GetTermBuffer(h)
 	if tb == nil {
 		return
 	}
@@ -87,12 +76,12 @@ DestroyTermBuffer :: proc(id : u32) {
 		delete(line.cells)
 	}
 	delete(tb.lines)
-	tb^ = {}
+	mem.Free(&term_buffers, h)
 }
 
 // 清空全部行(1049h 进交替屏时)
-TermBufferClear :: proc(id : u32) {
-	tb := GetTermBuffer(id)
+TermBufferClear :: proc(h : mem.Handle) {
+	tb := GetTermBuffer(h)
 	if tb == nil {
 		return
 	}
@@ -116,84 +105,76 @@ Console :: struct {
 
 	vt : VtState,
 
-	term_buffer_ids : [MAX_BUFFERS_PER_CONSOLE]u32, // ids[0] = 主屏
+	term_buffer_ids : [MAX_BUFFERS_PER_CONSOLE]mem.Handle, // ids[0] = 主屏
 	term_buffer_count : u32,
-	active_term_buffer_id : u32, // 当前渲染/写入的页;0 = 未登记
+	active_term_buffer_id : mem.Handle, // 当前渲染/写入的页;0 = 未登记
 
-	font_id : u32, // 布局取度量、渲染取图集;0 = 未设
+	conpty_handle : mem.Handle, // 绑定的 ConPTY
+
+	font_id : mem.Handle, // 布局取度量、渲染取图集;0 = 未设
 	font_size : f32, // 创建时的目标字号
 }
 
-consoles_count : u32 = 1
-consoles : [MAX_CONSOLE_SLOTS]Console // rows == 0 = 空槽
+consoles : mem.GenArray(MAX_CONSOLE_SLOTS, Console)
 
-// 槽位 id 必须等于 conpty 槽位 id;自动建主屏 TermBuffer
-CreateConsole :: proc(rows, cols : u16, conpty_id : u32) -> (id : u32, ok : bool) {
+// 自动建主屏 TermBuffer;绑定 conpty_handle
+CreateConsole :: proc(rows, cols : u16, conpty_handle : mem.Handle) -> (h : mem.Handle, ok : bool) {
 	if rows == 0 || cols == 0 {
-		return 0, false
+		return {}, false
 	}
-	if conpty_id == 0 || conpty_id >= MAX_CONSOLE_SLOTS {
-		return 0, false
+	if ct.GetConptyContext(conpty_handle) == nil {
+		return {}, false
 	}
-	if consoles[conpty_id].rows != 0 {
-		return 0, false
-	}
-	if ct.GetConptyContext(conpty_id) == nil {
-		return 0, false
-	}
-	tb_id, tb_ok := CreateTermBuffer()
+	tb_h, tb_ok := CreateTermBuffer()
 	if !tb_ok {
-		return 0, false
+		return {}, false
 	}
-	consoles[conpty_id] = Console {
+	console := Console {
 		rows = rows,
 		cols = cols,
+		conpty_handle = conpty_handle,
 	}
-	consoles[conpty_id].vt = VtState {
+	console.vt = VtState {
 		autowrap = true,
 		cursor_visible = true,
 		scroll_bottom = rows - 1,
 		style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR },
 	}
-	if !ConsoleAttachTermBuffer(conpty_id, tb_id) {
-		DestroyTermBuffer(tb_id)
-		consoles[conpty_id] = {}
-		return 0, false
+	h = mem.Alloc(&consoles, console)
+	if h.id == 0 {
+		DestroyTermBuffer(tb_h)
+		return {}, false
 	}
-	if conpty_id + 1 > consoles_count {
-		consoles_count = conpty_id + 1
+	if !ConsoleAttachTermBuffer(h, tb_h) {
+		DestroyTermBuffer(tb_h)
+		mem.Free(&consoles, h)
+		return {}, false
 	}
-	return conpty_id, true
+	return h, true
 }
 
-GetConsole :: proc(id : u32) -> ^Console {
-	if id == 0 || id >= MAX_CONSOLE_SLOTS {
-		return nil
-	}
-	if consoles[id].rows == 0 {
-		return nil
-	}
-	return &consoles[id]
+GetConsole :: proc(h : mem.Handle) -> ^Console {
+	return mem.Get(&consoles, h)
 }
 
-ConsoleActiveTermBuffer :: proc(console_id : u32) -> u32 {
-	console := GetConsole(console_id)
+ConsoleActiveTermBuffer :: proc(console_h : mem.Handle) -> mem.Handle {
+	console := GetConsole(console_h)
 	if console == nil {
-		return 0
+		return {}
 	}
 	return console.active_term_buffer_id
 }
 
 // ConPTY 侧由 conpty 包负责,这里只释放视口
-DestroyConsole :: proc(id : u32) {
-	console := GetConsole(id)
+DestroyConsole :: proc(h : mem.Handle) {
+	console := GetConsole(h)
 	if console == nil {
 		return
 	}
 	for i in 0 ..< int(console.term_buffer_count) {
 		DestroyTermBuffer(console.term_buffer_ids[i])
 	}
-	console^ = {}
+	mem.Free(&consoles, h)
 }
 
 // ---------------------------------------------------------------------------
@@ -201,38 +182,38 @@ DestroyConsole :: proc(id : u32) {
 // ---------------------------------------------------------------------------
 
 // 登记一个 TermBuffer 并设为当前渲染目标;重复登记只切换不新增
-ConsoleAttachTermBuffer :: proc(console_id, term_buffer_id : u32) -> bool {
-	console := GetConsole(console_id)
+ConsoleAttachTermBuffer :: proc(console_h, term_buffer_h : mem.Handle) -> bool {
+	console := GetConsole(console_h)
 	if console == nil {
 		return false
 	}
-	if GetTermBuffer(term_buffer_id) == nil {
+	if GetTermBuffer(term_buffer_h) == nil {
 		return false
 	}
 	for i in 0 ..< int(console.term_buffer_count) {
-		if console.term_buffer_ids[i] == term_buffer_id {
-			console.active_term_buffer_id = term_buffer_id
+		if console.term_buffer_ids[i] == term_buffer_h {
+			console.active_term_buffer_id = term_buffer_h
 			return true
 		}
 	}
 	if console.term_buffer_count >= MAX_BUFFERS_PER_CONSOLE {
 		return false
 	}
-	console.term_buffer_ids[console.term_buffer_count] = term_buffer_id
+	console.term_buffer_ids[console.term_buffer_count] = term_buffer_h
 	console.term_buffer_count += 1
-	console.active_term_buffer_id = term_buffer_id
+	console.active_term_buffer_id = term_buffer_h
 	return true
 }
 
 // 在已登记的 TermBuffer 间切换(1049 交替屏);未登记的 id 拒绝
-ConsoleActivateTermBuffer :: proc(console_id, term_buffer_id : u32) -> bool {
-	console := GetConsole(console_id)
+ConsoleActivateTermBuffer :: proc(console_h, term_buffer_h : mem.Handle) -> bool {
+	console := GetConsole(console_h)
 	if console == nil {
 		return false
 	}
 	for i in 0 ..< int(console.term_buffer_count) {
-		if console.term_buffer_ids[i] == term_buffer_id {
-			console.active_term_buffer_id = term_buffer_id
+		if console.term_buffer_ids[i] == term_buffer_h {
+			console.active_term_buffer_id = term_buffer_h
 			return true
 		}
 	}
@@ -248,8 +229,8 @@ applyConsoleSize :: proc(console : ^Console, rows, cols : u16) {
 }
 
 // Resize 时先改 ConPTY 再改这里;已有行不截断
-ConsoleSetSize :: proc(console_id : u32, rows, cols : u16) -> bool {
-	console := GetConsole(console_id)
+ConsoleSetSize :: proc(console_h : mem.Handle, rows, cols : u16) -> bool {
+	console := GetConsole(console_h)
 	if console == nil || rows == 0 || cols == 0 {
 		return false
 	}
@@ -259,8 +240,8 @@ ConsoleSetSize :: proc(console_id : u32, rows, cols : u16) -> bool {
 
 // iterm 几何变化时由渲染层每帧调用(transform 现算不存):
 // 取整出 cols/rows,网格在 iterm 内居中;cols/rows 变化后 ConPTY 尺寸由调用方联动
-ConsoleUpdateLayout :: proc(console_id : u32, t : Transform, cell_w, cell_h : f32) -> bool {
-	console := GetConsole(console_id)
+ConsoleUpdateLayout :: proc(console_h : mem.Handle, t : Transform, cell_w, cell_h : f32) -> bool {
+	console := GetConsole(console_h)
 	if console == nil || cell_w <= 0 || cell_h <= 0 {
 		return false
 	}
@@ -272,8 +253,8 @@ ConsoleUpdateLayout :: proc(console_id : u32, t : Transform, cell_w, cell_h : f3
 	return true
 }
 
-ConsoleSetCursor :: proc(console_id : u32, row, col : u16) -> bool {
-	console := GetConsole(console_id)
+ConsoleSetCursor :: proc(console_h : mem.Handle, row, col : u16) -> bool {
+	console := GetConsole(console_h)
 	if console == nil {
 		return false
 	}
@@ -282,8 +263,8 @@ ConsoleSetCursor :: proc(console_id : u32, row, col : u16) -> bool {
 	return true
 }
 
-ConsoleSetScrollOffset :: proc(console_id : u32, offset : u32) -> bool {
-	console := GetConsole(console_id)
+ConsoleSetScrollOffset :: proc(console_h : mem.Handle, offset : u32) -> bool {
+	console := GetConsole(console_h)
 	if console == nil {
 		return false
 	}
@@ -301,8 +282,8 @@ ConsoleSetScrollOffset :: proc(console_id : u32, offset : u32) -> bool {
 // ---------------------------------------------------------------------------
 
 // 落格 → 前进 → 行尾折行(autowrap 关则停在最后一列)→ 滚动区上移
-ConsoleWriteRune :: proc(console_id : u32, cp : rune, style : CellStyle) -> bool {
-	console := GetConsole(console_id)
+ConsoleWriteRune :: proc(console_h : mem.Handle, cp : rune, style : CellStyle) -> bool {
+	console := GetConsole(console_h)
 	if console == nil {
 		return false
 	}
@@ -331,7 +312,7 @@ ConsoleWriteRune :: proc(console_id : u32, cp : rune, style : CellStyle) -> bool
 					append(&tb.lines, Line{})
 				}
 			} else {
-				vtScrollUp(console_id)
+				vtScrollUp(console_h)
 			}
 			tb.lines[console.cursor_row].wrapped = true
 		} else {
