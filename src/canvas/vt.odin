@@ -19,20 +19,32 @@ VtState :: struct {
 	state : VtStateKind,
 	params : [16]int,
 	param_count : int,
-	private : bool, // CSI '?' 前缀
+	private : u8,      // CSI 私用标记:0=无 1='?'(DEC) 2='>'(xterm) 3=其他
+	intermediate : u8, // CSI 中间字节(0x20-0x2F,最后一次),0=无
 
 	utf8_pending : [4]u8, // 未收完的 UTF-8 分片
 	utf8_pending_len : int,
+
+	esc_pending : bool, // ESC ( ) * + # % 后:下一字节是参数,直接消费
 
 	style : CellStyle,
 	saved_cursor_row, saved_cursor_col : u16,
 	scroll_top, scroll_bottom : u16,
 	autowrap : bool,
 	cursor_visible : bool,
+	cursor_style : u8,     // DECSCUSR:0=默认 1=闪烁块 2=稳态块 3=闪烁下划线 4=稳态下划线 5=闪烁竖线 6=稳态竖线
 	alt_term_buffer_id : mem.Handle, // 0 = 未创建
+	mouse_mode : u8,       // 0=关 1=1000 2=1002 3=1003
+	sgr_mouse : bool,      // 1006
+	focus_events : bool,   // 1004
+	bracketed_paste : bool, // 2004
+	modify_other_keys : u8, // 0/1/2
 }
 
 update_scratch : [64 * 1024]byte // 主循环单线程,包级复用
+
+// DA2 应答里的终端版本号
+DA2_VERSION :: 100
 
 UpdateConsole :: proc(console_h : mem.Handle) {
 	console := GetConsole(console_h)
@@ -59,6 +71,10 @@ vtFeed :: proc(console_h : mem.Handle, data : []byte) {
 	for b in data {
 		switch vt.state {
 		case .Normal:
+			if vt.esc_pending { // 消费 ESC ( ) * + # % 后的参数字节
+				vt.esc_pending = false
+				continue
+			}
 			if vt.utf8_pending_len > 0 { // 收完分片再打印
 				vt.utf8_pending[vt.utf8_pending_len] = b
 				vt.utf8_pending_len += 1
@@ -87,7 +103,8 @@ vtFeed :: proc(console_h : mem.Handle, data : []byte) {
 				vt.state = .Csi
 				vt.param_count = 1
 				vt.params[0] = 0
-				vt.private = false
+				vt.private = 0
+				vt.intermediate = 0
 			case ']':
 				vt.state = .Osc
 			case '7': // DECSC
@@ -98,6 +115,28 @@ vtFeed :: proc(console_h : mem.Handle, data : []byte) {
 				vt.state = .Normal
 			case 'P', 'X', '^', '_': // DCS/APC/PM,忽略到 ST
 				vt.state = .Osc
+			case '(', ')', '*', '+', '#', '%': // 字符集/属性/编码选择:下一字节是参数
+				vt.esc_pending = true
+				vt.state = .Normal
+			case '=': // DECKPAM 应用小键盘
+				vt.state = .Normal
+			case '>': // DECKPNM 数字小键盘
+				vt.state = .Normal
+			case 'D': // IND 索引(下移)
+				vtLf(console_h)
+				vt.state = .Normal
+			case 'E': // NEL 下一行
+				console.cursor_col = 0
+				vtLf(console_h)
+				vt.state = .Normal
+			case 'M': // RI 反索引(上移)
+				vtReverseIndex(console_h)
+				vt.state = .Normal
+			case 'c': // RIS 复位
+				vtReset(console_h)
+				vt.state = .Normal
+			case 'N', 'O': // SS2/SS3 单移位,忽略
+				vt.state = .Normal
 			case:
 				vt.state = .Normal
 			}
@@ -105,7 +144,13 @@ vtFeed :: proc(console_h : mem.Handle, data : []byte) {
 		case .Csi:
 			switch {
 			case b == '?':
-				vt.private = true
+				vt.private = 1
+			case b == '>':
+				vt.private = 2
+			case b == '<':
+				vt.private = 3
+			case b >= 0x20 && b <= 0x2F: // 中间字节($ SP ! " 等)
+				vt.intermediate = b
 			case b >= '0' && b <= '9':
 				if vt.param_count == 0 {
 					vt.param_count = 1
@@ -171,7 +216,7 @@ vtLf :: proc(console_h : mem.Handle) {
 	if tb == nil {
 		return
 	}
-	if console.cursor_row < console.vt.scroll_bottom {
+	if int(console.cursor_row) - screenBase(console, tb) < int(console.vt.scroll_bottom) {
 		console.cursor_row += 1
 		return
 	}
@@ -220,6 +265,38 @@ vtScrollDown :: proc(console_h : mem.Handle) {
 	delete(tb.lines[bottom].cells)
 	remove_range(&tb.lines, bottom, bottom + 1)
 	insertLine(&tb.lines, top)
+}
+
+// RI:光标上移一行;在滚动区顶则向下滚动
+vtReverseIndex :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return
+	}
+	base := screenBase(console, tb)
+	if int(console.cursor_row) - base > int(console.vt.scroll_top) {
+		console.cursor_row -= 1
+		return
+	}
+	vtScrollDown(console_h)
+}
+
+// RIS:复位终端(清屏 + 重置样式/滚动区/光标)
+vtReset :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	TermBufferClear(console.active_term_buffer_id)
+	console.vt.style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR }
+	console.vt.scroll_top = 0
+	console.vt.scroll_bottom = console.rows - 1
+	console.vt.autowrap = true
+	console.cursor_row, console.cursor_col = 0, 0
 }
 
 // core:slice 无 insert 的替代实现
@@ -291,6 +368,11 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 		return
 	}
 	vt := &console.vt
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	base := 0
+	if tb != nil {
+		base = screenBase(console, tb)
+	}
 	p0 := vt.params[0]
 	p1 := 0
 	if vt.param_count > 1 {
@@ -300,10 +382,14 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 	switch final {
 	case 'A': // CUU
 		n := max(1, p0)
-		console.cursor_row = u16(max(int(console.vt.scroll_top), int(console.cursor_row) - n))
+		screen_row := int(console.cursor_row) - base
+		screen_row = max(int(console.vt.scroll_top), screen_row - n)
+		console.cursor_row = u16(base + screen_row)
 	case 'B': // CUD
 		n := max(1, p0)
-		console.cursor_row = u16(min(int(console.vt.scroll_bottom), int(console.cursor_row) + n))
+		screen_row := int(console.cursor_row) - base
+		screen_row = min(int(console.vt.scroll_bottom), screen_row + n)
+		console.cursor_row = u16(base + screen_row)
 	case 'C': // CUF
 		n := max(1, p0)
 		console.cursor_col = u16(min(int(console.cols) - 1, int(console.cursor_col) + n))
@@ -311,7 +397,7 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 		n := max(1, p0)
 		console.cursor_col = u16(max(0, int(console.cursor_col) - n))
 	case 'H', 'f': // CUP(1-based)
-		row := clamp(p0 - 1, int(console.vt.scroll_top), int(console.vt.scroll_bottom))
+		row := base + clamp(p0 - 1, int(console.vt.scroll_top), int(console.vt.scroll_bottom))
 		col := clamp(p1 - 1, 0, int(console.cols) - 1)
 		console.cursor_row, console.cursor_col = u16(row), u16(col)
 	case 'G': // CHA
@@ -320,8 +406,12 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 		vtEraseInDisplay(console_h, p0)
 	case 'K': // EL
 		vtEraseInLine(console_h, p0)
-	case 'm': // SGR
-		vtSgr(console_h)
+	case 'm': // SGR;xterm 私用 '>' 是 modifyOtherKeys
+		if vt.private == 2 {
+			vt.modify_other_keys = u8(p1) // CSI > 4;Nm,N=0/1/2
+		} else {
+			vtSgr(console_h)
+		}
 	case 'h', 'l': // DEC 模式
 		vtSetMode(console_h, final == 'h')
 	case 'r': // 滚动区
@@ -346,7 +436,41 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 	case 'n': // DSR
 		if p0 == 6 {
 			vtReplyCursor(console_h)
+		} else if p0 == 5 {
+			vtReplyOk(console_h) // 设备状态正常
 		}
+	case 'c': // DA 设备属性
+		if vt.private == 2 {
+			vtReplyDa2(console_h)
+		} else {
+			vtReplyDa1(console_h)
+		}
+	case 'p': // DECRQM 模式查询(带 $ 中间字节)
+		if vt.intermediate == '$' {
+			vtReplyDecrqm(console_h, p0)
+		}
+	case 'q': // DECSCUSR 光标形状(带 SP 中间字节)
+		if vt.intermediate == ' ' {
+			vt.cursor_style = u8(clamp(p0, 0, 6))
+		}
+	case 'X': // ECH 擦除 n 字符
+		vtEraseChars(console_h, max(1, p0))
+	case 'P': // DCH 删除 n 字符(左侧补)
+		vtDeleteChars(console_h, max(1, p0))
+	case '@': // ICH 插入 n 空白字符(右侧挤出)
+		vtInsertChars(console_h, max(1, p0))
+	case 'L': // IL 光标处插入 n 空行
+		vtInsertLines(console_h, max(1, p0))
+	case 'M': // DL 删除光标处 n 行
+		vtDeleteLines(console_h, max(1, p0))
+	case 'd': // VPA 行绝对定位
+		console.cursor_row = u16(base + clamp(p0 - 1, 0, int(console.rows) - 1))
+	case '`': // HPA 列绝对定位
+		console.cursor_col = u16(clamp(p0 - 1, 0, int(console.cols) - 1))
+	case 'e': // VPR 行相对下移
+		console.cursor_row = u16(min(base + int(console.vt.scroll_bottom), int(console.cursor_row) + max(1, p0)))
+	case 'a': // HPR 列相对右移
+		console.cursor_col = u16(min(int(console.cols) - 1, int(console.cursor_col) + max(1, p0)))
 	}
 }
 
@@ -356,7 +480,7 @@ vtSetMode :: proc(console_h : mem.Handle, set : bool) {
 		return
 	}
 	vt := &console.vt
-	if !vt.private {
+	if vt.private != 1 { // 仅 '?' DEC 私用模式
 		return
 	}
 	switch vt.params[0] {
@@ -364,6 +488,18 @@ vtSetMode :: proc(console_h : mem.Handle, set : bool) {
 		vt.autowrap = set
 	case 25:
 		vt.cursor_visible = set
+	case 1000:
+		vt.mouse_mode = set ? 1 : 0
+	case 1002:
+		vt.mouse_mode = set ? 2 : 0
+	case 1003:
+		vt.mouse_mode = set ? 3 : 0
+	case 1006:
+		vt.sgr_mouse = set
+	case 1004:
+		vt.focus_events = set
+	case 2004:
+		vt.bracketed_paste = set
 	case 1049:
 		vtAltScreen(console_h, set)
 	case 2026: // 同步输出,全量重建天然满足
@@ -483,6 +619,125 @@ vtClearLineAll :: proc(console_h : mem.Handle, row : int) {
 	}
 }
 
+// ECH:从光标起擦除 n 个字符(不清空行)
+vtEraseChars :: proc(console_h : mem.Handle, n : int) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return
+	}
+	row := int(console.cursor_row)
+	if row >= len(tb.lines) {
+		return
+	}
+	line := &tb.lines[row]
+	start := int(console.cursor_col)
+	end := min(start + n, len(line.cells))
+	for i in start ..< end {
+		line.cells[i] = {}
+	}
+}
+
+// DCH:删除光标起 n 字符,右侧左移补空白
+vtDeleteChars :: proc(console_h : mem.Handle, n : int) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return
+	}
+	row := int(console.cursor_row)
+	if row >= len(tb.lines) {
+		return
+	}
+	line := &tb.lines[row]
+	col := int(console.cursor_col)
+	nn := min(n, len(line.cells) - col)
+	remove_range(&line.cells, col, col + nn)
+	for i in 0 ..< nn {
+		append(&line.cells, Cell{})
+	}
+}
+
+// ICH:光标处插入 n 空白字符,右侧挤出
+vtInsertChars :: proc(console_h : mem.Handle, n : int) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return
+	}
+	row := int(console.cursor_row)
+	for len(tb.lines) <= row {
+		append(&tb.lines, Line{})
+	}
+	line := &tb.lines[row]
+	for len(line.cells) < int(console.cols) {
+		append(&line.cells, Cell{})
+	}
+	col := int(console.cursor_col)
+	nn := min(n, int(console.cols) - col)
+	copy(line.cells[col + nn:], line.cells[col:int(console.cols) - nn])
+	for i in col ..< col + nn {
+		line.cells[i] = {}
+	}
+}
+
+// IL:光标处插入 n 空行,滚动区底行被挤出
+vtInsertLines :: proc(console_h : mem.Handle, n : int) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return
+	}
+	base := screenBase(console, tb)
+	row := int(console.cursor_row)
+	bottom := base + int(console.vt.scroll_bottom)
+	for i in 0 ..< n {
+		for len(tb.lines) <= bottom {
+			append(&tb.lines, Line{})
+		}
+		if bottom < len(tb.lines) {
+			delete(tb.lines[bottom].cells)
+			remove_range(&tb.lines, bottom, bottom + 1)
+		}
+		insertLine(&tb.lines, row)
+	}
+}
+
+// DL:删除光标处 n 行,滚动区底补空行
+vtDeleteLines :: proc(console_h : mem.Handle, n : int) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return
+	}
+	base := screenBase(console, tb)
+	row := int(console.cursor_row)
+	bottom := base + int(console.vt.scroll_bottom)
+	for i in 0 ..< n {
+		if row >= len(tb.lines) {
+			break
+		}
+		delete(tb.lines[row].cells)
+		remove_range(&tb.lines, row, row + 1)
+		insertLine(&tb.lines, bottom)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SGR
 // ---------------------------------------------------------------------------
@@ -569,6 +824,69 @@ vtReplyCursor :: proc(console_h : mem.Handle) {
 	}
 	msg := fmt.tprintf("\x1b[%d;%dR", int(console.cursor_row) + 1, int(console.cursor_col) + 1)
 	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)msg)
+}
+
+vtReplyOk :: proc(console_h : mem.Handle) { // DSR 5:设备状态正常
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)string("\x1b[0n"))
+}
+
+// DA1:CSI c → CSI ? 1;2c(VT100 兼容)
+vtReplyDa1 :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)string("\x1b[?1;2c"))
+}
+
+// DA2:CSI > Ps c → CSI > 0;{版本};0c(nvim 用它识别终端)
+vtReplyDa2 :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	msg := fmt.tprintf("\x1b[>0;%d;0c", DA2_VERSION)
+	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)msg)
+}
+
+// DECRQM:CSI ? Ps $ p → CSI ? Ps;Pm $ y(Pm:0=未知 1=置位 2=复位 3=永置 4=永复)
+vtReplyDecrqm :: proc(console_h : mem.Handle, mode : int) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	state := vtQueryMode(console, mode)
+	msg := fmt.tprintf("\x1b[?%d;%d$y", mode, state)
+	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)msg)
+}
+
+vtQueryMode :: proc(console : ^Console, mode : int) -> int {
+	vt := &console.vt
+	switch mode {
+	case 7:
+		return vt.autowrap ? 1 : 2
+	case 25:
+		return vt.cursor_visible ? 1 : 2
+	case 1049:
+		return vt.alt_term_buffer_id.id != 0 ? 1 : 2
+	case 1000:
+		return vt.mouse_mode == 1 ? 1 : 2
+	case 1002:
+		return vt.mouse_mode == 2 ? 1 : 2
+	case 1003:
+		return vt.mouse_mode == 3 ? 1 : 2
+	case 1006:
+		return vt.sgr_mouse ? 1 : 2
+	case 1004:
+		return vt.focus_events ? 1 : 2
+	case 2004:
+		return vt.bracketed_paste ? 1 : 2
+	}
+	return 0 // 未识别
 }
 
 // 调试/测试:直接喂字节给解析器,绕过 ConPTY

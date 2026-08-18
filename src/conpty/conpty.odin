@@ -96,6 +96,13 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string) -> (ctx: ConptyCo
 		return
 	}
 
+	// 子进程 std 句柄直连管道:pseudoconsole 只接管控制台(conhost),std 句柄
+	// 否则会继承父进程(stdout 泄漏到父控制台),这里显式重定向到 ConPTY 管道两端
+	start_info.StartupInfo.dwFlags = win.STARTF_USESTDHANDLES
+	start_info.StartupInfo.hStdInput = conpty_side_read
+	start_info.StartupInfo.hStdOutput = conpty_side_write
+	start_info.StartupInfo.hStdError = conpty_side_write
+
 	cmd_wide := win.utf8_to_wstring(cmd)
 
 	if !win.CreateProcessW(

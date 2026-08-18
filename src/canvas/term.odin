@@ -220,12 +220,26 @@ ConsoleActivateTermBuffer :: proc(console_h, term_buffer_h : mem.Handle) -> bool
 	return false
 }
 
-// 改网格尺寸的公共副作用:cursor/滚动区下限 clamp
+// 改网格尺寸的副作用:cursor_col/滚动区下限 clamp + scroll_offset 锚定补偿。
+// 锚定规则(同 alacritty):贴底保持贴底,滚动中保持视口内容(visible_top)不动。
+// 注意:cursor_row 是物理行索引(指向 lines,可 > rows),不能按屏幕行 clamp。
 applyConsoleSize :: proc(console : ^Console, rows, cols : u16) {
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	visible_top_before := 0
+	if tb != nil {
+		visible_top_before = max(0, len(tb.lines) - int(console.rows) - int(tb.scroll_offset))
+	}
+
 	console.rows, console.cols = rows, cols
-	console.cursor_row = min(console.cursor_row, rows - 1)
 	console.cursor_col = min(console.cursor_col, cols - 1)
 	console.vt.scroll_bottom = rows - 1
+
+	// 滚动中:反推 scroll_offset 使 visible_top 不变(内容不被拽走)
+	if tb != nil && tb.scroll_offset != 0 {
+		max_scroll := max(0, len(tb.lines) - int(rows))
+		s := len(tb.lines) - int(rows) - visible_top_before
+		tb.scroll_offset = u32(max(0, min(s, max_scroll)))
+	}
 }
 
 // Resize 时先改 ConPTY 再改这里;已有行不截断
@@ -281,6 +295,11 @@ ConsoleSetScrollOffset :: proc(console_h : mem.Handle, offset : u32) -> bool {
 // 写路径
 // ---------------------------------------------------------------------------
 
+// 当前屏幕(底部 rows 行)在 lines 里的物理起始行;len <= rows 时为 0(顶部锚定)
+screenBase :: proc(console : ^Console, tb : ^TermBuffer) -> int {
+	return max(0, len(tb.lines) - int(console.rows))
+}
+
 // 落格 → 前进 → 行尾折行(autowrap 关则停在最后一列)→ 滚动区上移
 ConsoleWriteRune :: proc(console_h : mem.Handle, cp : rune, style : CellStyle) -> bool {
 	console := GetConsole(console_h)
@@ -306,7 +325,7 @@ ConsoleWriteRune :: proc(console_h : mem.Handle, cp : rune, style : CellStyle) -
 	if console.cursor_col >= console.cols {
 		console.cursor_col = 0
 		if console.vt.autowrap {
-			if console.cursor_row < console.vt.scroll_bottom {
+			if int(console.cursor_row) - screenBase(console, tb) < int(console.vt.scroll_bottom) {
 				console.cursor_row += 1
 				for len(tb.lines) <= int(console.cursor_row) {
 					append(&tb.lines, Line{})

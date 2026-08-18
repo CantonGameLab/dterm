@@ -1,120 +1,113 @@
-// CLI 测试:ConPTY → VT 解析 → TermBuffer → dump 到 dump.txt
-// 用法:./src.exe [command](默认 cmd.exe)
-// 注:command 参数直接传给 CreateProcessW,非交互命令需带 cmd 前缀:
-//   ./src.exe "cmd /c chcp 65001 && echo 你好 && echo ok"
+// 窗口主循环:初始化 + 简单循环(事件 → 更新 → 渲染)+ 清理。
 package main
 
 import ct "conpty"
 import cv "canvas"
+import ev "event"
+import inp "input"
+import fnt "font"
+import rd "render"
 import mem "memory"
 import "core:fmt"
-import "core:os"
-import "core:strings"
-import "core:time"
 
 main :: proc() {
-	cmd := "cmd.exe"
-	if len(os.args) > 1 {
-		cmd = strings.join(os.args[1:], " ")
+	if !rd.Init() {
+		fmt.eprintln("render init failed")
+		return
+	}
+	defer rd.Quit()
+	if !inp.Init(rd.GetWindow()) {
+		fmt.eprintln("input init failed")
+		return
 	}
 
-	id, ok := ct.CreateConptyContext({120, 30}, cmd)
-	if !ok {
+	cv.InitWindowTree()
+	w, h := rd.GetWindowSize()
+	cv.WindowTreeSetRootSize(w, h)
+
+	font_h, font_ok := fnt.LoadFont("resource/font/Go-Mono/GoMonoNerdFontMono-Regular.ttf", 50)
+	if !font_ok {
+		fmt.eprintln("LoadFont failed")
+		return
+	}
+	defer fnt.DestroyFont(font_h)
+
+	conpty_h, conpty_ok := ct.CreateConptyContext({80, 24}, "cmd.exe")
+	if !conpty_ok {
 		fmt.eprintln("CreateConptyContext failed")
 		return
 	}
-	defer ct.DestroyConpty(id)
+	defer ct.DestroyConpty(conpty_h) // 兜底释放(读线程未启动时)
 
-	console_id, ok2 := cv.CreateConsole(30, 120, id)
-	if !ok2 {
+	console_h, console_ok := cv.CreateConsole(24, 80, conpty_h)
+	if !console_ok {
 		fmt.eprintln("CreateConsole failed")
 		return
 	}
-	defer cv.DestroyConsole(console_id)
-	
-	if !ct.StartReadThread(id) {
+	defer cv.DestroyConsole(console_h)
+	cv.GetConsole(console_h).font_id = font_h
+
+	if !ct.StartReadThread(conpty_h) {
 		fmt.eprintln("StartReadThread failed")
 		return
 	}
-	defer ct.StopReadThread(id)
+	defer ct.StopReadThread(conpty_h)
 
-	time.sleep(800 * time.Millisecond) // 等启动输出
-	drain(console_id)
+	root_h := cv.WindowTreeRoot()
+	iterm_index, _ := cv.TreeNodeAddIterm(root_h, cv.ItermType.Console, console_h)
+	it := cv.ItermGet(root_h, iterm_index)
+	it.scale_width = 1 // 填满节点
+	it.scale_height = 1
 
-	ct.WriteConptyInput(id, transmute([]byte)string("dir /b\r"))
-	time.sleep(600 * time.Millisecond)
-	drain(console_id)
+	theme := rd.Theme { fg = 0xDCDCDC, bg = 0x1E1E1E, cursor = 0xFFFFFF }
 
-	// 直接喂 VT 序列验证解析器(经输入管道会被 cmd 行编辑器吃掉)
-	// 注:ConPTY 输入管道是字节流,cmd 按当前代码页解析,写中文需参数模式:
-	//   ./src.exe "chcp 65001 && echo 你好 && echo ok"
-	cv.ConsoleFeed(console_id, transmute([]byte)string("\r\n\x1b[31mRED\x1b[32mGREEN\x1b[1mBOLD\x1b[4mUNDERLINE\x1b[7mREVERSE\x1b[0mplain"))
-	cv.ConsoleFeed(console_id, transmute([]byte)string("\r\n\x1b[44mBLUEBG\x1b[0mnormal"))
-	cv.ConsoleFeed(console_id, transmute([]byte)string("\r\n你好UTF8")) // UTF-8 分片解析
-	cv.ConsoleFeed(console_id, transmute([]byte)string("\x1b[5;10Habs-pos")) // 绝对定位覆盖写
-
-	dumpConsole(console_id, "dump.txt")
-	fmt.eprintln("dump -> dump.txt")
-}
-
-// 循环喂解析器直到消费完(ring 空时 UpdateConsole 立即返回)
-drain :: proc(console_h : mem.Handle) {
-	for i in 0 ..< 64 {
-		cv.UpdateConsole(console_h)
+	for {
+		inp.BeginFrame() // 清上一帧 pressed + 重置输入缓冲
+		if ev.Poll() {
+			break
+		}
+		// 本帧输入(文本 + 控制字符/转义序列)发给 ConPTY
+		if buf := inp.TakeText(); len(buf) > 0 {
+			ct.WriteConptyInput(conpty_h, buf)
+		}
+		update()
+		rd.BeginFrame()
+		rd.DrawFrame(theme)
+		rd.EndFrame()
 	}
 }
 
-dumpConsole :: proc(console_h : mem.Handle, path : string) {
-	console := cv.GetConsole(console_h)
-	tb := cv.GetTermBuffer(cv.ConsoleActiveTermBuffer(console_h))
-	if console == nil || tb == nil {
-		fmt.eprintln("dump: console/tb nil")
+// 更新步:遍历树,对每个 Console 更新布局 + 拉取 ConPTY 输出
+update :: proc() {
+	updateWalk(cv.WindowTreeRoot())
+}
+
+updateWalk :: proc(node_h : mem.Handle) {
+	node := cv.GetWindowTreeNode(node_h)
+	if node == nil {
 		return
 	}
-	visible_top := max(0, len(tb.lines) - int(console.rows))
-
-	buf := strings.builder_make()
-	defer strings.builder_destroy(&buf)
-
-	fmt.sbprintf(&buf, "rows=%d cols=%d lines=%d visible_top=%d cursor=(%d,%d) scroll=(%d,%d)\n",
-		console.rows, console.cols, len(tb.lines), visible_top,
-		console.cursor_row, console.cursor_col,
-		console.vt.scroll_top, console.vt.scroll_bottom)
-
-	for line, i in tb.lines {
-		sb := strings.builder_make()
-		for cell in line.cells {
-			if cell.cp == 0 {
-				strings.write_byte(&sb, ' ')
-			} else {
-				strings.write_rune(&sb, cell.cp)
-			}
-		}
-		text := strings.trim_right(strings.to_string(sb), " ")
-		strings.builder_destroy(&sb)
-
-		flag := "h" // 历史行
-		if i >= visible_top {
-			flag = "v" // 可视行
-		}
-		if i == int(console.cursor_row) {
-			flag = ">" // 光标行
-		}
-
-		// 非默认样式行,附颜色值验证 SGR;cp==0 的空 cell 不参与判定
-		style_note := ""
-		for cell in line.cells {
-			if cell.cp == 0 {
-				continue
-			}
-			if cell.fg != cv.DEFAULT_COLOR || cell.bg != cv.DEFAULT_COLOR || cell.bold || cell.italic || cell.underline || cell.reverse {
-				style_note = fmt.tprintf(" [fg=%08X bg=%08X b=%v]", cell.fg, cell.bg, cell.bold)
-				break
-			}
-		}
-		fmt.sbprintf(&buf, "%4d %s%s| %s\n", i, flag, style_note, text)
+	if !node.is_leaf {
+		updateWalk(node.left_son_id)
+		updateWalk(node.right_son_id)
+		return
 	}
-	if err := os.write_entire_file_from_string(path, strings.to_string(buf)); err != nil {
-		fmt.eprintln("write dump failed:", err)
+	for i in 0 ..< len(node.iterms) {
+		if node.iterms[i].type != cv.ItermType.Console {
+			continue
+		}
+		console_h := node.iterms[i].console_id
+		console := cv.GetConsole(console_h)
+		if console == nil {
+			continue
+		}
+		t := cv.ItermAbsoluteTransform(node_h, i)
+		m := fnt.GetMetrics(console.font_id)
+		old_rows, old_cols := console.rows, console.cols
+		cv.ConsoleUpdateLayout(console_h, t, m.cell_width, m.cell_height)
+		if console.rows != old_rows || console.cols != old_cols {
+			ct.Resize(console.conpty_handle, console.cols, console.rows)
+		}
+		cv.UpdateConsole(console_h)
 	}
 }

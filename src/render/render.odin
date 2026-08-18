@@ -1,6 +1,6 @@
-// 窗口渲染框架:SDL3 + OpenGL 4.4 核心管线。
-// 屏幕坐标 = 像素,左上原点,Y 向下;顶点着色器里换算 NDC。
-// 每帧:BeginFrame → DrawRect/DrawText → EndFrame。
+// SDL3 + OpenGL 4.4 渲染层:窗口 / GL 上下文 / 图元批。
+// 渲染是数据管线终端:只读消费 canvas/font,绝不写回模型数据。
+// 屏幕坐标 = 像素,左上原点,Y 向下。每帧:BeginFrame → 绘制 → EndFrame。
 package render
 
 import s3 "vendor:sdl3"
@@ -63,7 +63,7 @@ Vertex :: struct {
 	r, g, b, a : f32,
 }
 
-MAX_QUADS :: 4096 // 120x30 一屏 3600 格,余量足够
+MAX_QUADS :: 4096
 quad_verts : [MAX_QUADS * 6]Vertex
 quad_count : int
 current_tex : u32
@@ -74,10 +74,10 @@ vao, vbo : u32
 // 生命周期
 // ---------------------------------------------------------------------------
 
-RenderInit :: proc() {
+Init :: proc() -> bool {
 	if !s3.Init({.VIDEO}) {
 		fmt.eprintln("SDL3 Init Failed:", s3.GetError())
-		return
+		return false
 	}
 	window = s3.CreateWindow(
 		INIT_WINDOW_TITLE,
@@ -87,7 +87,7 @@ RenderInit :: proc() {
 	)
 	if window == nil {
 		fmt.eprintln("CreateWindow Failed:", s3.GetError())
-		return
+		return false
 	}
 
 	s3.GL_SetAttribute(.CONTEXT_MAJOR_VERSION, 4)
@@ -100,11 +100,11 @@ RenderInit :: proc() {
 	gl_context = s3.GL_CreateContext(window)
 	if gl_context == nil {
 		fmt.eprintln("Create GL Context Failed:", s3.GetError())
-		return
+		return false
 	}
 	if !s3.GL_MakeCurrent(window, gl_context) {
 		fmt.eprintln("绑定GL上下文失败:", s3.GetError())
-		return
+		return false
 	}
 
 	gl.load_up_to(
@@ -115,18 +115,19 @@ RenderInit :: proc() {
 		}
 	)
 
-	s3.GL_SetSwapInterval(0)
+	s3.GL_SetSwapInterval(1)
 
 	program = linkProgram(compileShader(gl.VERTEX_SHADER, VERT_SRC), compileShader(gl.FRAGMENT_SHADER, FRAG_SRC))
 	if program == 0 {
-		return
+		return false
 	}
 	u_screen_size = gl.GetUniformLocation(program, "uScreenSize")
 	initBatch()
 	initWhiteTexture()
+	return true
 }
 
-RenderQuit :: proc() {
+Quit :: proc() {
 	gl.DeleteProgram(program)
 	gl.DeleteBuffers(1, &vbo)
 	gl.DeleteVertexArrays(1, &vao)
@@ -136,15 +137,17 @@ RenderQuit :: proc() {
 	s3.Quit()
 }
 
-// 处理事件;返回 true = 窗口请求关闭
-PollEvents :: proc() -> bool {
-	for e: s3.Event; s3.PollEvent(&e); {
-		#partial switch e.type {
-		case .QUIT:
-			return true
-		}
-	}
-	return false
+// 当前窗口物理尺寸(像素):GL framebuffer 的真实尺寸,渲染/布局都用它。
+// 注意不能用 s3.GetWindowSize(那是逻辑尺寸/点,受 DPI 缩放影响)。
+GetWindowSize :: proc() -> (w, h : u32) {
+	cw, ch : c.int
+	s3.GetWindowSizeInPixels(window, &cw, &ch)
+	return u32(cw), u32(ch)
+}
+
+// 窗口指针(供 input 启用文本输入等)
+GetWindow :: proc() -> ^s3.Window {
+	return window
 }
 
 // ---------------------------------------------------------------------------
@@ -152,11 +155,10 @@ PollEvents :: proc() -> bool {
 // ---------------------------------------------------------------------------
 
 BeginFrame :: proc() {
-	w, h : c.int
-	s3.GetWindowSize(window, &w, &h)
+	w, h := GetWindowSize()
 	screen_w, screen_h = f32(w), f32(h)
 
-	gl.Viewport(0, 0, w, h)
+	gl.Viewport(0, 0, c.int(w), c.int(h))
 	gl.ClearColor(0.07, 0.09, 0.12, 1)
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 
@@ -181,10 +183,20 @@ DrawRect :: proc(x, y, w, h : f32, color : u32) {
 	pushQuad(white_tex, x, y, x + w, y + h, 0, 0, 1, 1, color)
 }
 
-// 文本,(x, y) = 基线位置;font_id 为 font 包槽位句柄
-DrawText :: proc(font_id : mem.Handle, text : string, x, y : f32, color : u32) {
-	tex := fnt.GetAtlasTexture(font_id)
-	m := fnt.GetMetrics(font_id)
+// 单字形,(x, y) = 基线位置;返回前进宽,无字形时按格宽
+DrawRune :: proc(font_h : mem.Handle, cp : rune, x, y : f32, color : u32) -> (advance : f32) {
+	g, ok := fnt.GetGlyph(font_h, cp)
+	if !ok {
+		return fnt.GetMetrics(font_h).cell_width
+	}
+	tex := fnt.GetAtlasTexture(font_h)
+	pushQuad(tex, x + g.xoff, y + g.yoff, x + g.xoff + g.bitmap_w, y + g.yoff + g.bitmap_h, g.uv0_x, g.uv0_y, g.uv1_x, g.uv1_y, color)
+	return g.advance
+}
+
+// 文本,(x, y) = 基线位置
+DrawText :: proc(font_h : mem.Handle, text : string, x, y : f32, color : u32) {
+	m := fnt.GetMetrics(font_h)
 	pen_x, pen_y := x, y
 	for r in text {
 		if r == '\n' {
@@ -192,13 +204,7 @@ DrawText :: proc(font_id : mem.Handle, text : string, x, y : f32, color : u32) {
 			pen_y += m.cell_height
 			continue
 		}
-		g, ok := fnt.GetGlyph(font_id, r)
-		if !ok {
-			pen_x += m.cell_width
-			continue
-		}
-		pushQuad(tex, pen_x + g.xoff, pen_y + g.yoff, pen_x + g.xoff + g.bitmap_w, pen_y + g.yoff + g.bitmap_h, g.uv0_x, g.uv0_y, g.uv1_x, g.uv1_y, color)
-		pen_x += g.advance
+		pen_x += DrawRune(font_h, r, pen_x, pen_y, color)
 	}
 }
 
