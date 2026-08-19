@@ -68,9 +68,10 @@ drawConsole :: proc(node_h : mem.Handle, iterm_index : int, theme : Theme) {
 		col_limit := min(int(console.cols), len(line.cells))
 		for c in 0 ..< col_limit {
 			cell := line.cells[c]
-			if cell.cp == 0 {
-				continue
+			if cell.cp == 0 && !cell.wide {
+				continue // 纯空白格
 			}
+			// 宽字符:本格画字形 + 背景,续列(cp=0, wide)只画背景(共 2 格)
 			cx := console.origin_x + f32(c) * m.cell_width
 			cy := console.origin_y + f32(r) * m.cell_height
 			drawCell(console.font_id, cell, cx, cy, m, theme)

@@ -2,6 +2,8 @@ package canvas
 
 import ct "../conpty"
 import mem "../memory"
+import vp "../vtparse"
+import "core:fmt"
 
 // 双层屏幕模型:
 //   内容层 TermBuffer:一"页"的所有行(含滚动历史)。
@@ -20,8 +22,30 @@ CellStyle :: struct {
 }
 
 Cell :: struct {
-	cp : rune, // 0 = 空白格
+	cp : rune, // 0 = 空白格;宽字符续列 = cp 0 + wide true
 	using style : CellStyle,
+	wide : bool, // 宽字符(占 2 列)或宽字符的续列
+}
+
+// 宽字符判定(EAW=W/F 的核心子集,与 nvim/wcwidth 一致)
+runeWidth :: proc(cp : rune) -> int {
+	switch {
+	case cp >= 0x1100 && cp <= 0x115F: return 2 // Hangul Jamo
+	case cp >= 0x2E80 && cp <= 0x303E: return 2 // CJK 部首/符号
+	case cp >= 0x3041 && cp <= 0x33FF: return 2 // 假名/CJK 兼容
+	case cp >= 0x3400 && cp <= 0x4DBF: return 2 // CJK 扩展 A
+	case cp >= 0x4E00 && cp <= 0x9FFF: return 2 // CJK 统一
+	case cp >= 0xA000 && cp <= 0xA4CF: return 2 // 彝文
+	case cp >= 0xAC00 && cp <= 0xD7A3: return 2 // Hangul 音节
+	case cp >= 0xF900 && cp <= 0xFAFF: return 2 // CJK 兼容表意
+	case cp >= 0xFE30 && cp <= 0xFE4F: return 2 // CJK 兼容形式
+	case cp >= 0xFF00 && cp <= 0xFF60: return 2 // 全角 ASCII
+	case cp >= 0xFFE0 && cp <= 0xFFE6: return 2 // 全角符号
+	case cp >= 0x1F300 && cp <= 0x1F64F: return 2 // emoji
+	case cp >= 0x20000 && cp <= 0x2FFFD: return 2 // CJK 扩展 B+
+	case cp >= 0x30000 && cp <= 0x3FFFD: return 2
+	}
+	return 1
 }
 
 Line :: struct {
@@ -145,6 +169,9 @@ CreateConsole :: proc(rows, cols : u16, conpty_handle : mem.Handle) -> (h : mem.
 		DestroyTermBuffer(tb_h)
 		return {}, false
 	}
+	// 解析器回调绑定(user_data 存句柄供回调取回)
+	vp.Init(&GetConsole(h).vt.parser, vtParserCallback)
+	GetConsole(h).vt.parser.user_data = packHandle(h)
 	if !ConsoleAttachTermBuffer(h, tb_h) {
 		DestroyTermBuffer(tb_h)
 		mem.Free(&consoles, h)
@@ -233,6 +260,7 @@ applyConsoleSize :: proc(console : ^Console, rows, cols : u16) {
 	console.rows, console.cols = rows, cols
 	console.cursor_col = min(console.cursor_col, cols - 1)
 	console.vt.scroll_bottom = rows - 1
+	console.vt.wrap_pending = false
 
 	// 滚动中:反推 scroll_offset 使 visible_top 不变(内容不被拽走)
 	if tb != nil && tb.scroll_offset != 0 {
@@ -300,7 +328,29 @@ screenBase :: proc(console : ^Console, tb : ^TermBuffer) -> int {
 	return max(0, len(tb.lines) - int(console.rows))
 }
 
-// 落格 → 前进 → 行尾折行(autowrap 关则停在最后一列)→ 滚动区上移
+// 折行一次:光标下移/滚动,列归 0。调用方保证 pending 语义由自己处理
+vtWrapOnce :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return
+	}
+	if int(console.cursor_row) - screenBase(console, tb) < int(console.vt.scroll_bottom) {
+		console.cursor_row += 1
+		for len(tb.lines) <= int(console.cursor_row) {
+			append(&tb.lines, Line{})
+		}
+	} else {
+		vtScrollUp(console_h)
+	}
+	tb.lines[console.cursor_row].wrapped = true
+	console.cursor_col = 0
+}
+
+// 落格 → 前进 → 最后一列置 wrap-pending(下一字符才折行)→ 滚动区上移
 ConsoleWriteRune :: proc(console_h : mem.Handle, cp : rune, style : CellStyle) -> bool {
 	console := GetConsole(console_h)
 	if console == nil {
@@ -310,33 +360,43 @@ ConsoleWriteRune :: proc(console_h : mem.Handle, cp : rune, style : CellStyle) -
 	if tb == nil {
 		return false
 	}
+	// wrap-pending:上一字符写满最后一列,本字符先折行再落格
+	if console.vt.wrap_pending {
+		console.vt.wrap_pending = false
+		if console.vt.autowrap {
+			vtWrapOnce(console_h)
+		} else {
+			console.cursor_col = console.cols - 1
+		}
+	}
 	row, col := int(console.cursor_row), int(console.cursor_col)
+	when VT_DEBUG {
+		vtDbg(console_h, fmt.tprintf("WRITE '%c' at %d,%d", cp, row, col))
+	}
 
+	w := runeWidth(cp)
+	// 宽字符放不下当前列(只剩 1 列):先折行再写(xterm 语义)
+	if w == 2 && col + w > int(console.cols) {
+		vtWrapOnce(console_h)
+		row, col = int(console.cursor_row), int(console.cursor_col)
+	}
 	for len(tb.lines) <= row {
 		append(&tb.lines, Line{})
 	}
 	line := &tb.lines[row]
-	for len(line.cells) <= col {
+	for len(line.cells) <= col + w - 1 {
 		append(&line.cells, Cell{})
 	}
-	line.cells[col] = Cell { cp = cp, style = style }
+	line.cells[col] = Cell { cp = cp, style = style, wide = w == 2 }
+	if w == 2 {
+		line.cells[col + 1] = Cell { wide = true } // 续列
+	}
 
-	console.cursor_col += 1
+	console.cursor_col += u16(w)
 	if console.cursor_col >= console.cols {
-		console.cursor_col = 0
-		if console.vt.autowrap {
-			if int(console.cursor_row) - screenBase(console, tb) < int(console.vt.scroll_bottom) {
-				console.cursor_row += 1
-				for len(tb.lines) <= int(console.cursor_row) {
-					append(&tb.lines, Line{})
-				}
-			} else {
-				vtScrollUp(console_h)
-			}
-			tb.lines[console.cursor_row].wrapped = true
-		} else {
-			console.cursor_col = console.cols - 1
-		}
+		// 写满最后一列:光标停最后一列,置 pending,等下一字符决定折行
+		console.cursor_col = console.cols - 1
+		console.vt.wrap_pending = console.vt.autowrap
 	}
 	return true
 }

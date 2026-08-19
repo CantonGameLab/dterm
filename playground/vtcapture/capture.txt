@@ -1,0 +1,24 @@
+<ESC>[?9001h<ESC>[?1004h<ESC>[?25l<ESC>[2J<ESC>[m<ESC>[H<ESC>]0;C:\Program Files\Neovim\bin\nvim.exe<BEL><ESC>[?25h<ESC>[?1049h<ESC>[22;0;0t<ESC>[2J<ESC>[?2004h<ESC>[?u<ESC>[?25l<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<CR><LF>
+<ESC>[K<ESC>[H<ESC>[?25h<ESC>[>4;2m<ESC>[1 q<ESC>[?1002h<ESC>[?1006h<ESC>[?25l                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                <ESC>[H<ESC>[?25h<ESC>[2 q<ESC>[2 q<ESC>[?25l<ESC>[38;2;224;226;234m<ESC>[48;2;20;22;27m// 窗口主循环:初始化 + 简单循环(事件 → 更新 → 渲染)+ 清理。                     package main                                                                                                                                                    import ct "conpty"                                                              import cv "canvas"                                                              import ev "event"                                                               import inp "input"                                                              import fnt "font"                                                               import rd "render"                                                              import mem "memory"                                                             import "core:fmt"                                                                                                                                               main :: proc() {                                                                        if !rd.Init() {                                                                         fmt.eprintln("render init failed")                                              return                                                                  }                                                                               defer rd.Quit()                                                                 if !inp.Init(rd.GetWindow()) {                                                          fmt.eprintln("input init failed")                                               return                                                                  }                                                                       <ESC>[48;2;79;82;88msrc\main.odin                                                 1,1            Top<ESC>[48;2;20;22;27m                                                                                <ESC>[H<ESC>[?25h<ESC>[?1004h<ESC>[m

@@ -2,35 +2,21 @@ package canvas
 
 import ct "../conpty"
 import mem "../memory"
+import vp "../vtparse"
 import "core:fmt"
 
-// VT 解析器:字节流 → 状态机 → 操作 Console。
-// 每帧 UpdateConsole(id) 拉取 ConPTY 输出并喂给解析器;VtState 嵌在 Console.vt。
-
-VtStateKind :: enum u8 {
-	Normal,
-	Esc,
-	Csi,
-	Osc,
-	OscEsc,
-}
+// VT 解析:vtparse 状态机(字节流 → 动作回调),回调操作 Console。
+// 每帧 UpdateConsole(id) 拉取 ConPTY 输出喂给解析器;VtState 嵌在 Console.vt。
 
 VtState :: struct {
-	state : VtStateKind,
-	params : [16]int,
-	param_count : int,
-	private : u8,      // CSI 私用标记:0=无 1='?'(DEC) 2='>'(xterm) 3=其他
-	intermediate : u8, // CSI 中间字节(0x20-0x2F,最后一次),0=无
-
-	utf8_pending : [4]u8, // 未收完的 UTF-8 分片
-	utf8_pending_len : int,
-
-	esc_pending : bool, // ESC ( ) * + # % 后:下一字节是参数,直接消费
+	parser : vp.Parser, // 字节级状态机(切分序列)
 
 	style : CellStyle,
 	saved_cursor_row, saved_cursor_col : u16,
+	saved_scroll_top, saved_scroll_bottom : u16, // 交替屏进出时保存/恢复滚动区
 	scroll_top, scroll_bottom : u16,
 	autowrap : bool,
+	wrap_pending : bool, // 写满最后一列:停在该列,下一字符才折行(xterm 语义)
 	cursor_visible : bool,
 	cursor_style : u8,     // DECSCUSR:0=默认 1=闪烁块 2=稳态块 3=闪烁下划线 4=稳态下划线 5=闪烁竖线 6=稳态竖线
 	alt_term_buffer_id : mem.Handle, // 0 = 未创建
@@ -42,6 +28,21 @@ VtState :: struct {
 }
 
 update_scratch : [64 * 1024]byte // 主循环单线程,包级复用
+
+// 调试追踪:odin build src/ -define:vt_debug=true 时打印光标移动
+VT_DEBUG :: #config(vt_debug, false)
+
+vtDbg :: proc(console_h : mem.Handle, msg : string) {
+	when VT_DEBUG {
+		c := GetConsole(console_h)
+		tb := GetTermBuffer(c.active_term_buffer_id)
+		ln := 0
+		if tb != nil {
+			ln = len(tb.lines)
+		}
+		fmt.eprintfln("VTDBG %s cur=(%d,%d) lines=%d", msg, c.cursor_row, c.cursor_col, ln)
+	}
+}
 
 // DA2 应答里的终端版本号
 DA2_VERSION :: 100
@@ -67,142 +68,112 @@ vtFeed :: proc(console_h : mem.Handle, data : []byte) {
 	if console == nil {
 		return
 	}
-	vt := &console.vt
-	for b in data {
-		switch vt.state {
-		case .Normal:
-			if vt.esc_pending { // 消费 ESC ( ) * + # % 后的参数字节
-				vt.esc_pending = false
-				continue
-			}
-			if vt.utf8_pending_len > 0 { // 收完分片再打印
-				vt.utf8_pending[vt.utf8_pending_len] = b
-				vt.utf8_pending_len += 1
-				if vt.utf8_pending_len >= vtUtf8Len(vt.utf8_pending[0]) {
-					vtPrint(console_h, vtDecodeRune(vt.utf8_pending[:vt.utf8_pending_len]))
-					vt.utf8_pending_len = 0
-				}
-				continue
-			}
-			switch {
-			case b == 0x1B:
-				vt.state = .Esc
-			case b < 0x20 || b == 0x7F:
-				vtHandleC0(console_h, b)
-			case b < 0x80:
-				vtPrint(console_h, rune(b))
-			case b >= 0xC0:
-				vt.utf8_pending[0] = b
-				vt.utf8_pending_len = 1
-			case: // 游离续字节,丢弃
-			}
+	vp.Parse(&console.vt.parser, data)
+}
 
-		case .Esc:
-			switch b {
-			case '[':
-				vt.state = .Csi
-				vt.param_count = 1
-				vt.params[0] = 0
-				vt.private = 0
-				vt.intermediate = 0
-			case ']':
-				vt.state = .Osc
-			case '7': // DECSC
-				vt.saved_cursor_row, vt.saved_cursor_col = console.cursor_row, console.cursor_col
-				vt.state = .Normal
-			case '8': // DECRC
-				console.cursor_row, console.cursor_col = vt.saved_cursor_row, vt.saved_cursor_col
-				vt.state = .Normal
-			case 'P', 'X', '^', '_': // DCS/APC/PM,忽略到 ST
-				vt.state = .Osc
-			case '(', ')', '*', '+', '#', '%': // 字符集/属性/编码选择:下一字节是参数
-				vt.esc_pending = true
-				vt.state = .Normal
-			case '=': // DECKPAM 应用小键盘
-				vt.state = .Normal
-			case '>': // DECKPNM 数字小键盘
-				vt.state = .Normal
-			case 'D': // IND 索引(下移)
-				vtLf(console_h)
-				vt.state = .Normal
-			case 'E': // NEL 下一行
-				console.cursor_col = 0
-				vtLf(console_h)
-				vt.state = .Normal
-			case 'M': // RI 反索引(上移)
-				vtReverseIndex(console_h)
-				vt.state = .Normal
-			case 'c': // RIS 复位
-				vtReset(console_h)
-				vt.state = .Normal
-			case 'N', 'O': // SS2/SS3 单移位,忽略
-				vt.state = .Normal
-			case:
-				vt.state = .Normal
-			}
-
-		case .Csi:
-			switch {
-			case b == '?':
-				vt.private = 1
-			case b == '>':
-				vt.private = 2
-			case b == '<':
-				vt.private = 3
-			case b >= 0x20 && b <= 0x2F: // 中间字节($ SP ! " 等)
-				vt.intermediate = b
-			case b >= '0' && b <= '9':
-				if vt.param_count == 0 {
-					vt.param_count = 1
-					vt.params[0] = 0
-				}
-				vt.params[vt.param_count - 1] = vt.params[vt.param_count - 1] * 10 + int(b - '0')
-			case b == ';' || b == ':':
-				vt.param_count += 1
-				if vt.param_count < len(vt.params) {
-					vt.params[vt.param_count - 1] = 0
-				}
-			case b >= 0x40 && b <= 0x7E:
-				vtCsiDispatch(console_h, b)
-				vt.state = .Normal
-			case:
-				vt.state = .Normal
-			}
-
-		case .Osc:
-			if b == 0x07 {
-				vt.state = .Normal
-			} else if b == 0x1B {
-				vt.state = .OscEsc
-			}
-
-		case .OscEsc:
-			vt.state = b == '\\' ? .Normal : .Osc
-		}
+// vtparse 回调 → canvas 操作(Console 句柄经 user_data 取回)
+vtParserCallback :: proc(p : ^vp.Parser, action : vp.Action, ch : rune) {
+	console_h := unpackHandle(p.user_data)
+	#partial switch action {
+	case .Print:
+		vtPrint(console_h, ch)
+	case .Execute:
+		vtHandleC0(console_h, u8(ch))
+	case .EscDispatch:
+		vtEscDispatch(console_h, p, u8(ch))
+	case .CsiDispatch:
+		vtCsiDispatch(console_h, p, u8(ch))
+	case .OscStart, .OscPut, .OscEnd:
+		// OSC 内容暂不处理(标题/剪贴板后续)
+	case .Hook, .Put, .Unhook:
+		// DCS 暂不处理
 	}
+}
+
+// ESC 序列派发(无中间字节才处理;带中间字节的字符集/属性等忽略)
+vtEscDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	if p.num_intermediate_chars > 0 {
+		return
+	}
+	switch final {
+	case '7': // DECSC
+		console.vt.saved_cursor_row, console.vt.saved_cursor_col = console.cursor_row, console.cursor_col
+	case '8': // DECRC(光标恢复,取消折行等待)
+		console.vt.wrap_pending = false
+		console.cursor_row, console.cursor_col = console.vt.saved_cursor_row, console.vt.saved_cursor_col
+	case 'D': // IND
+		vtLf(console_h)
+	case 'E': // NEL
+		console.cursor_col = 0
+		vtLf(console_h)
+	case 'M': // RI
+		vtReverseIndex(console_h)
+	case 'c': // RIS
+		vtReset(console_h)
+	}
+}
+
+// Handle 打包进 user_data(64 位:id 低 32 位,generation 高 32 位)
+packHandle :: proc(h : mem.Handle) -> rawptr {
+	return rawptr(uintptr(h.id) | uintptr(h.generation) << 32)
+}
+
+unpackHandle :: proc(p : rawptr) -> mem.Handle {
+	v := uintptr(p)
+	return mem.Handle { id = u32(v), generation = u32(v >> 32) }
 }
 
 // ---------------------------------------------------------------------------
 // C0
 // ---------------------------------------------------------------------------
 
+// 光标列落在宽字符续列(cp=0 + wide)时,再向 dir 方向挪一列
+skipWideCol :: proc(console : ^Console, col : int, dir : int) -> int {
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return col
+	}
+	row := int(console.cursor_row)
+	if row < 0 || row >= len(tb.lines) {
+		return col
+	}
+	c := col
+	if c >= 0 && c < len(tb.lines[row].cells) {
+		cell := tb.lines[row].cells[c]
+		if cell.cp == 0 && cell.wide {
+			c += dir
+		}
+	}
+	return c
+}
+
 vtHandleC0 :: proc(console_h : mem.Handle, b : u8) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
+	when VT_DEBUG {
+		vtDbg(console_h, fmt.tprintf("C0 0x%02x", b))
+	}
 	switch b {
-	case 0x07: // BEL,忽略
-	case 0x08: // BS,左移不删字符
+	case 0x07: // BEL,忽略(不取消折行等待)
+	case 0x08: // BS,左移不删字符(跳过宽字符续列)
+		console.vt.wrap_pending = false
 		if console.cursor_col > 0 {
-			console.cursor_col -= 1
+			console.cursor_col = u16(skipWideCol(console, int(console.cursor_col) - 1, -1))
 		}
 	case 0x09: // TAB,下一 8 列停靠位
+		console.vt.wrap_pending = false
 		col := (int(console.cursor_col) / 8 + 1) * 8
 		console.cursor_col = min(u16(col), console.cols - 1)
-	case 0x0A, 0x0B, 0x0C: // LF/VT/FF
+	case 0x0A, 0x0B, 0x0C: // LF/VT/FF(不清 pending:写满后 LF 下移,下一字符仍折行)
 		vtLf(console_h)
 	case 0x0D: // CR
+		console.vt.wrap_pending = false
 		console.cursor_col = 0
 	}
 }
@@ -212,6 +183,7 @@ vtLf :: proc(console_h : mem.Handle) {
 	if console == nil {
 		return
 	}
+	when VT_DEBUG { vtDbg(console_h, "LF") }
 	tb := GetTermBuffer(console.active_term_buffer_id)
 	if tb == nil {
 		return
@@ -296,6 +268,7 @@ vtReset :: proc(console_h : mem.Handle) {
 	console.vt.scroll_top = 0
 	console.vt.scroll_bottom = console.rows - 1
 	console.vt.autowrap = true
+	console.vt.wrap_pending = false
 	console.cursor_row, console.cursor_col = 0, 0
 }
 
@@ -337,32 +310,11 @@ vtPrint :: proc(console_h : mem.Handle, cp : rune) {
 	ConsoleWriteRune(console_h, cp, console.vt.style)
 }
 
-vtUtf8Len :: proc(b : u8) -> int {
-	switch {
-	case b < 0x80: return 1
-	case b < 0xE0: return 2
-	case b < 0xF0: return 3
-	case b < 0xF8: return 4
-	}
-	return 0
-}
-
-vtDecodeRune :: proc(bytes : []u8) -> rune {
-	b := bytes
-	switch len(b) {
-	case 1: return rune(b[0])
-	case 2: return rune(b[0] & 0x1F) << 6 | rune(b[1] & 0x3F)
-	case 3: return rune(b[0] & 0x0F) << 12 | rune(b[1] & 0x3F) << 6 | rune(b[2] & 0x3F)
-	case 4: return rune(b[0] & 0x07) << 18 | rune(b[1] & 0x3F) << 12 | rune(b[2] & 0x3F) << 6 | rune(b[3] & 0x3F)
-	}
-	return 0
-}
-
 // ---------------------------------------------------------------------------
 // CSI
 // ---------------------------------------------------------------------------
 
-vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
+vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
@@ -373,47 +325,92 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 	if tb != nil {
 		base = screenBase(console, tb)
 	}
-	p0 := vt.params[0]
+	// 注意:wrap_pending 不能被 SGR 等 CSI 清除(xterm 语义,写满列后
+	// 改颜色再写字符仍要折行;nvim 的 eob/状态栏绘制依赖此行为)。
+	// 只有光标定位类操作才清除(见各 case)。
+	// vtparse 的 Clear 只重置 num_params 不清数组:无参数序列必须显式取 0,
+	// 否则读到上一条序列的残留参数(如 ESC[2J 后跟 ESC[H 会带 p0=2)
+	p0 := 0
+	if p.num_params > 0 {
+		p0 = p.params[0]
+	}
 	p1 := 0
-	if vt.param_count > 1 {
-		p1 = vt.params[1]
+	if p.num_params > 1 {
+		p1 = p.params[1]
+	}
+	// 私用标记(> ? < =)与中间字节($ SP 等)收集在 intermediate_chars
+	private := u8(0)
+	if p.num_intermediate_chars > 0 {
+		private = p.intermediate_chars[0]
+	}
+	intermediate := u8(0)
+	if p.num_intermediate_chars > 1 {
+		intermediate = p.intermediate_chars[1]
 	}
 
 	switch final {
 	case 'A': // CUU
+		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUU p0=%d", p0)) }
+		vt.wrap_pending = false
 		n := max(1, p0)
 		screen_row := int(console.cursor_row) - base
 		screen_row = max(int(console.vt.scroll_top), screen_row - n)
 		console.cursor_row = u16(base + screen_row)
 	case 'B': // CUD
+		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUD p0=%d", p0)) }
+		vt.wrap_pending = false
 		n := max(1, p0)
 		screen_row := int(console.cursor_row) - base
 		screen_row = min(int(console.vt.scroll_bottom), screen_row + n)
 		console.cursor_row = u16(base + screen_row)
-	case 'C': // CUF
+	case 'C': // CUF(跳过宽字符续列)
+		vt.wrap_pending = false
 		n := max(1, p0)
-		console.cursor_col = u16(min(int(console.cols) - 1, int(console.cursor_col) + n))
-	case 'D': // CUB
+		c := int(console.cursor_col)
+		for i in 0 ..< n {
+			if c >= int(console.cols) - 1 {
+				c = int(console.cols) - 1
+				break
+			}
+			c += 1
+			c = skipWideCol(console, c, 1)
+		}
+		console.cursor_col = u16(c)
+	case 'D': // CUB(跳过宽字符续列)
+		vt.wrap_pending = false
 		n := max(1, p0)
-		console.cursor_col = u16(max(0, int(console.cursor_col) - n))
+		c := int(console.cursor_col)
+		for i in 0 ..< n {
+			if c <= 0 {
+				c = 0
+				break
+			}
+			c -= 1
+			c = skipWideCol(console, c, -1)
+		}
+		console.cursor_col = u16(c)
 	case 'H', 'f': // CUP(1-based)
+		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUP p0=%d p1=%d base=%d", p0, p1, base)) }
+		vt.wrap_pending = false
 		row := base + clamp(p0 - 1, int(console.vt.scroll_top), int(console.vt.scroll_bottom))
 		col := clamp(p1 - 1, 0, int(console.cols) - 1)
 		console.cursor_row, console.cursor_col = u16(row), u16(col)
+		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUP -> %d,%d", row, col)) }
 	case 'G': // CHA
+		vt.wrap_pending = false
 		console.cursor_col = u16(clamp(p0 - 1, 0, int(console.cols) - 1))
 	case 'J': // ED
 		vtEraseInDisplay(console_h, p0)
 	case 'K': // EL
 		vtEraseInLine(console_h, p0)
 	case 'm': // SGR;xterm 私用 '>' 是 modifyOtherKeys
-		if vt.private == 2 {
+		if private == '>' {
 			vt.modify_other_keys = u8(p1) // CSI > 4;Nm,N=0/1/2
 		} else {
-			vtSgr(console_h)
+			vtSgr(console_h, p)
 		}
 	case 'h', 'l': // DEC 模式
-		vtSetMode(console_h, final == 'h')
+		vtSetMode(console_h, p, final == 'h')
 	case 'r': // 滚动区
 		top := clamp(p0 - 1, 0, int(console.rows) - 1)
 		bottom := int(console.rows) - 1
@@ -423,8 +420,13 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 		vt.scroll_top, vt.scroll_bottom = u16(min(top, bottom)), u16(max(top, bottom))
 	case 's': // 存光标
 		vt.saved_cursor_row, vt.saved_cursor_col = console.cursor_row, console.cursor_col
-	case 'u': // 取光标
-		console.cursor_row, console.cursor_col = vt.saved_cursor_row, vt.saved_cursor_col
+	case 'u': // 取光标;'?' 私用 = modifyOtherKeys 光标位置报告(应答 \e[?r;cR)
+		vt.wrap_pending = false
+		if private == '?' {
+			vtReplyCursorDec(console_h)
+		} else {
+			console.cursor_row, console.cursor_col = vt.saved_cursor_row, vt.saved_cursor_col
+		}
 	case 'S': // SU
 		for i in 0 ..< max(1, p0) {
 			vtScrollUp(console_h)
@@ -433,24 +435,32 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 		for i in 0 ..< max(1, p0) {
 			vtScrollDown(console_h)
 		}
-	case 'n': // DSR
-		if p0 == 6 {
+	case 'n': // DSR;'?' 私用 = DECXCPR(应答 \e[?r;cR)
+		if private == '?' {
+			if p0 == 6 {
+				vtReplyCursorDec(console_h)
+			}
+		} else if p0 == 6 {
 			vtReplyCursor(console_h)
 		} else if p0 == 5 {
 			vtReplyOk(console_h) // 设备状态正常
 		}
+	case 't': // XTWINOPS:18 = 窗口尺寸查询
+		if p0 == 18 {
+			vtReplyWindowSize(console_h)
+		}
 	case 'c': // DA 设备属性
-		if vt.private == 2 {
+		if private == '>' {
 			vtReplyDa2(console_h)
 		} else {
 			vtReplyDa1(console_h)
 		}
 	case 'p': // DECRQM 模式查询(带 $ 中间字节)
-		if vt.intermediate == '$' {
+		if intermediate == '$' {
 			vtReplyDecrqm(console_h, p0)
 		}
 	case 'q': // DECSCUSR 光标形状(带 SP 中间字节)
-		if vt.intermediate == ' ' {
+		if intermediate == ' ' {
 			vt.cursor_style = u8(clamp(p0, 0, 6))
 		}
 	case 'X': // ECH 擦除 n 字符
@@ -464,28 +474,39 @@ vtCsiDispatch :: proc(console_h : mem.Handle, final : u8) {
 	case 'M': // DL 删除光标处 n 行
 		vtDeleteLines(console_h, max(1, p0))
 	case 'd': // VPA 行绝对定位
+		vt.wrap_pending = false
 		console.cursor_row = u16(base + clamp(p0 - 1, 0, int(console.rows) - 1))
 	case '`': // HPA 列绝对定位
+		vt.wrap_pending = false
 		console.cursor_col = u16(clamp(p0 - 1, 0, int(console.cols) - 1))
 	case 'e': // VPR 行相对下移
+		vt.wrap_pending = false
 		console.cursor_row = u16(min(base + int(console.vt.scroll_bottom), int(console.cursor_row) + max(1, p0)))
 	case 'a': // HPR 列相对右移
+		vt.wrap_pending = false
 		console.cursor_col = u16(min(int(console.cols) - 1, int(console.cursor_col) + max(1, p0)))
 	}
 }
 
-vtSetMode :: proc(console_h : mem.Handle, set : bool) {
+vtSetMode :: proc(console_h : mem.Handle, p : ^vp.Parser, set : bool) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
 	vt := &console.vt
-	if vt.private != 1 { // 仅 '?' DEC 私用模式
+	if p.num_intermediate_chars == 0 || p.intermediate_chars[0] != '?' { // 仅 '?' DEC 私用模式
 		return
 	}
-	switch vt.params[0] {
+	mode := 0
+	if p.num_params > 0 {
+		mode = p.params[0]
+	}
+	switch mode {
 	case 7:
 		vt.autowrap = set
+		if !set {
+			vt.wrap_pending = false
+		}
 	case 25:
 		vt.cursor_visible = set
 	case 1000:
@@ -513,8 +534,11 @@ vtAltScreen :: proc(console_h : mem.Handle, enter : bool) {
 		return
 	}
 	vt := &console.vt
+	vt.wrap_pending = false
 	if enter {
 		vt.saved_cursor_row, vt.saved_cursor_col = console.cursor_row, console.cursor_col
+		vt.saved_scroll_top, vt.saved_scroll_bottom = vt.scroll_top, vt.scroll_bottom
+		vt.scroll_top, vt.scroll_bottom = 0, console.rows - 1
 		alt := vt.alt_term_buffer_id
 		if alt.id == 0 {
 			alt, _ = CreateTermBuffer()
@@ -535,6 +559,7 @@ vtAltScreen :: proc(console_h : mem.Handle, enter : bool) {
 			vt.alt_term_buffer_id = {}
 		}
 		console.cursor_row, console.cursor_col = vt.saved_cursor_row, vt.saved_cursor_col
+		vt.scroll_top, vt.scroll_bottom = vt.saved_scroll_top, vt.saved_scroll_bottom
 	}
 }
 
@@ -750,18 +775,23 @@ ANSI16 : [16]u32 = {
 	0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
 }
 
-vtSgr :: proc(console_h : mem.Handle) {
+vtSgr :: proc(console_h : mem.Handle, p : ^vp.Parser) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
 	vt := &console.vt
 	style := vt.style
-	params := vt.params[:vt.param_count]
+	params := p.params[:p.num_params]
 	i := 0
+	// ESC[m(无参数)= ESC[0m:重置样式,不能当 no-op
+	if len(params) == 0 {
+		vt.style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR }
+		return
+	}
 	for i < len(params) {
-		p := params[i]
-		switch p {
+		pp := params[i]
+		switch pp {
 		case 0:
 			style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR }
 		case 1: style.bold = true
@@ -772,25 +802,25 @@ vtSgr :: proc(console_h : mem.Handle) {
 		case 23: style.italic = false
 		case 24: style.underline = false
 		case 27: style.reverse = false
-		case 30 ..= 37: style.fg = ANSI16[p - 30]
+		case 30 ..= 37: style.fg = ANSI16[pp - 30]
 		case 38, 48: // 38;5;n / 38;2;r;g;b
 			if i + 1 < len(params) {
 				mode := params[i + 1]
 				if mode == 5 && i + 2 < len(params) {
 					color := ansi256ToRgb(params[i + 2])
-					if p == 38 { style.fg = color } else { style.bg = color }
+					if pp == 38 { style.fg = color } else { style.bg = color }
 					i += 2
 				} else if mode == 2 && i + 4 < len(params) {
 					color := (u32(params[i + 2]) << 16) | (u32(params[i + 3]) << 8) | u32(params[i + 4])
-					if p == 38 { style.fg = color } else { style.bg = color }
+					if pp == 38 { style.fg = color } else { style.bg = color }
 					i += 4
 				}
 			}
 		case 39: style.fg = DEFAULT_COLOR
-		case 40 ..= 47: style.bg = ANSI16[p - 40]
+		case 40 ..= 47: style.bg = ANSI16[pp - 40]
 		case 49: style.bg = DEFAULT_COLOR
-		case 90 ..= 97: style.fg = ANSI16[p - 90 + 8]
-		case 100 ..= 107: style.bg = ANSI16[p - 100 + 8]
+		case 90 ..= 97: style.fg = ANSI16[pp - 90 + 8]
+		case 100 ..= 107: style.bg = ANSI16[pp - 100 + 8]
 		}
 		i += 1
 	}
@@ -816,13 +846,45 @@ ansiCubeLevel :: proc(v : int) -> u32 {
 	return u32(v == 0 ? 0 : 55 + v * 40)
 }
 
-// ESC[row;colR 应答光标位置(程序阻塞等这个)
+// 光标屏幕位置(0-based):物理行 - 可视区顶部(历史 + 用户滚动)
+cursorScreenPos :: proc(console : ^Console) -> (row, col : int) {
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	top := 0
+	if tb != nil {
+		top = max(0, len(tb.lines) - int(console.rows) - int(tb.scroll_offset))
+	}
+	return int(console.cursor_row) - top, int(console.cursor_col)
+}
+
+// ESC[row;colR 应答光标位置(程序阻塞等这个);报屏幕坐标,不是物理行
 vtReplyCursor :: proc(console_h : mem.Handle) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
-	msg := fmt.tprintf("\x1b[%d;%dR", int(console.cursor_row) + 1, int(console.cursor_col) + 1)
+	r, c := cursorScreenPos(console)
+	msg := fmt.tprintf("\x1b[%d;%dR", r + 1, c + 1)
+	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)msg)
+}
+
+// DECXCPR(CSI ? 6 n)/modifyOtherKeys CPR(CSI ? u):应答带 '?' 前缀
+vtReplyCursorDec :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	r, c := cursorScreenPos(console)
+	msg := fmt.tprintf("\x1b[?%d;%dR", r + 1, c + 1)
+	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)msg)
+}
+
+// XTWINOPS 18t:窗口尺寸应答(nvim 等以此校准行数)
+vtReplyWindowSize :: proc(console_h : mem.Handle) {
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+	msg := fmt.tprintf("\x1b[8;%d;%dt", console.rows, console.cols)
 	ct.WriteConptyInput(console.conpty_handle, transmute([]byte)msg)
 }
 

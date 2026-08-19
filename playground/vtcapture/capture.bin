@@ -1,0 +1,24 @@
+[?9001h[?1004h[?25l[2J[m[H]0;C:\Program Files\Neovim\bin\nvim.exe[?25h[?1049h[22;0;0t[2J[?2004h[?u[?25l[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K
+[K[H[?25h[>4;2m[1 q[?1002h[?1006h[?25l                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                [H[?25h[2 q[2 q[?25l[38;2;224;226;234m[48;2;20;22;27m// 窗口主循环:初始化 + 简单循环(事件 → 更新 → 渲染)+ 清理。                     package main                                                                                                                                                    import ct "conpty"                                                              import cv "canvas"                                                              import ev "event"                                                               import inp "input"                                                              import fnt "font"                                                               import rd "render"                                                              import mem "memory"                                                             import "core:fmt"                                                                                                                                               main :: proc() {                                                                        if !rd.Init() {                                                                         fmt.eprintln("render init failed")                                              return                                                                  }                                                                               defer rd.Quit()                                                                 if !inp.Init(rd.GetWindow()) {                                                          fmt.eprintln("input init failed")                                               return                                                                  }                                                                       [48;2;79;82;88msrc\main.odin                                                 1,1            Top[48;2;20;22;27m                                                                                [H[?25h[?1004h[m
