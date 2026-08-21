@@ -1,6 +1,0 @@
-rows=30 cols=120 lines=5 visible_top=0 cursor=(4,16) scroll=(0,29)
-0000 v| 
-0001 v [fg=00800000 bg=FFFFFFFF b=false]| REDGREENBOLDUNDERLINEREVERSEplain
-0002 v [fg=FFFFFFFF bg=00000080 b=false]| BLUEBGnormal
-0003 v| 你好UTF8
-0004 >|          abs-pos

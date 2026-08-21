@@ -39,6 +39,7 @@ ATLAS_PAD :: 1 // 位图四周留 1px,防线性采样串色
 ATLAS_START :: 1024
 ATLAS_MAX :: 4096
 SLOT_LOAD_FACTOR :: 0.75
+SHAPE_CACHE_SLOTS :: 128 // 行 shape 缓存槽(轮转)
 
 // ttc 里取第 0 个字体
 FALLBACK_FONTS :: []string {
@@ -56,7 +57,8 @@ Face :: struct {
 
 // 字形缓存条目(哈希表,线性探测)
 GlyphSlot :: struct {
-	cp : rune, // 0 = 空槽
+	cp : rune, // 0 = 无 cp(可能是 gid 槽)
+	gid : u16, // 连体字形(内部 id);0 = 无。空槽 = cp==0 && gid==0
 	face_index : u8, // 重光栅化时按它选 face
 	w, h : u16, // 位图内容尺寸
 	xoff, yoff : f32,
@@ -72,15 +74,26 @@ Atlas :: struct {
 	cur_x, cur_y, row_height : u32,
 }
 
+// 行 shape 缓存条目:输入 glyph 序列哈希 → 输出序列。
+// 行内容不变则命中,跳过 GSUB 规则匹配(与字形缓存同理)。
+ShapeCacheSlot :: struct {
+	hash : u64, // 输入序列 FNV-1a;0 = 空槽
+	len : u16,
+	glyphs : [dynamic]u16, // 输出序列(连体替换后)
+}
+
 Font :: struct {
 	faces : [MAX_FACES]Face,
 	face_count : u32,
+	gsub : Gsub, // 主字体 GSUB 连体规则;无连体时 lookup_order 为空,ShapeLine 空转
 	antialias : u8, // 光栅化超采样倍数 1-3;相对静止,LoadFont 时一次设定
 	cell_width, cell_height : f32,
 	ascent : f32,
 	slots : [dynamic]GlyphSlot,
 	slot_count : u32,
 	atlas : Atlas,
+	shape_cache : [SHAPE_CACHE_SLOTS]ShapeCacheSlot, // 轮转覆盖
+	shape_cache_next : u32,
 }
 
 fonts : mem.GenArray(MAX_FONT_SLOTS, Font)
@@ -93,8 +106,10 @@ GetFont :: proc(h : mem.Handle) -> ^Font {
 	return mem.Get(&fonts, h)
 }
 
-// antialias:光栅化超采样倍数(1 = 关,2 = 2x2 超采样);相对静止,启动时一次设定
-LoadFont :: proc(path : string, size : f32, antialias : u8 = 2) -> (h : mem.Handle, ok : bool) {
+// antialias:光栅化超采样倍数(1 = 整数网格,2 = 2x2 超采样)。
+// 默认 1:oversample=2 的 subpixel 相位(-0.25)会让同一笔画在不同字形里
+// 灰度分布不同(横线粗细/明暗不一);整数光栅化所有字形一致。
+LoadFont :: proc(path : string, size : f32, antialias : u8 = 1) -> (h : mem.Handle, ok : bool) {
 	if size <= 0 {
 		return {}, false
 	}
@@ -118,6 +133,9 @@ LoadFont :: proc(path : string, size : f32, antialias : u8 = 2) -> (h : mem.Hand
 			}
 		}
 	}
+
+	// 主字体 GSUB(连体规则);解析失败 = 无连体,ShapeLine 空转
+	font.gsub = ParseGsub(font.faces[0].data)
 
 	// 格子度量:同字号下各 face 同 scale,取主 face
 	f := &font.faces[0]
@@ -150,7 +168,8 @@ DestroyFont :: proc(h : mem.Handle) {
 
 // 查字形:缓存命中直接返回;未命中则光栅化入图集。false = 所有 face 都无此字形
 GetGlyph :: proc(h : mem.Handle, cp : rune) -> (Glyph, bool) {
-	if GetFont(h) == nil {
+	font := GetFont(h)
+	if font == nil {
 		return {}, false
 	}
 	if slot := slotFind(h, cp); slot != nil {
@@ -176,6 +195,72 @@ GetMetrics :: proc(h : mem.Handle) -> Metrics {
 		cell_height = font.cell_height,
 		ascent = font.ascent,
 	}
+}
+
+// 按内部 glyph id 查字形(连体替换结果);缓存 + 主 face 光栅化
+GetGlyphById :: proc(h : mem.Handle, gid : u16) -> (Glyph, bool) {
+	font := GetFont(h)
+	if font == nil {
+		return {}, false
+	}
+	if slot := slotFindById(h, gid); slot != nil {
+		return glyphFromSlot(slot), true
+	}
+	if !glyphRasterizeById(h, gid) {
+		return {}, false
+	}
+	slot := slotFindById(h, gid)
+	if slot == nil {
+		return {}, false
+	}
+	return glyphFromSlot(slot), true
+}
+
+// 主字体 glyph id(连体输入);0 = 主字体无此字符(fallback 或不可渲染)
+GlyphIndex :: proc(h : mem.Handle, cp : rune) -> u16 {
+	font := GetFont(h)
+	if font == nil {
+		return 0
+	}
+	return u16(stbtt.FindGlyphIndex(&font.faces[0].info, cp))
+}
+
+// 对一行 glyph 序列逐 lookup 应用连体(原地修改;无 GSUB 时为空转)。
+// 带缓存:输入序列哈希命中直接复制上次结果,跳过规则匹配。
+// 无长度上限:超长行同样受益,行内普通字符(独立单位)由 ShapeGlyphs
+// 的 active 预扫跳过,缓存只按行哈希区分。
+ShapeLine :: proc(h : mem.Handle, glyphs : ^[dynamic]u16) {
+	font := GetFont(h)
+	if font == nil || len(font.gsub.lookup_order) == 0 {
+		return
+	}
+	n := len(glyphs)
+	hash := fnv1a(glyphs[:])
+	for i in 0 ..< SHAPE_CACHE_SLOTS {
+		slot := &font.shape_cache[i]
+		if slot.hash == hash && int(slot.len) == n {
+			resize(glyphs, int(slot.len))
+			copy(glyphs[:], slot.glyphs[:])
+			return
+		}
+	}
+	// 未命中:shape 后入缓存(轮转覆盖)
+	ShapeGlyphs(&font.gsub, glyphs)
+	idx := int(font.shape_cache_next) % SHAPE_CACHE_SLOTS
+	font.shape_cache_next += 1
+	slot := &font.shape_cache[idx]
+	clear(&slot.glyphs)
+	append(&slot.glyphs, ..glyphs[:])
+	slot.hash = hash
+	slot.len = u16(len(glyphs))
+}
+
+fnv1a :: proc(glyphs : []u16) -> u64 {
+	h : u64 = 14695981039346656037
+	for g in glyphs {
+		h = (h ~ u64(g)) * 1099511628211
+	}
+	return h
 }
 
 GetAtlasTexture :: proc(h : mem.Handle) -> u32 {
@@ -207,6 +292,10 @@ faceLoad :: proc(path : string, size : f32) -> (Face, bool) {
 
 // 释放 Font 值持有的资源(槽位释放与创建失败回滚共用)
 fontFree :: proc(font : ^Font) {
+	DestroyGsub(&font.gsub)
+	for &slot in font.shape_cache {
+		delete(slot.glyphs)
+	}
 	for i in 0 ..< int(font.face_count) {
 		delete(font.faces[i].data)
 	}
@@ -231,10 +320,32 @@ slotFind :: proc(font_h : mem.Handle, cp : rune) -> ^GlyphSlot {
 	i := int(uint(cp) % uint(cap))
 	for {
 		slot := &font.slots[i]
-		if slot.cp == cp {
+		if slot.cp == cp && slot.gid == 0 {
 			return slot
 		}
-		if slot.cp == 0 {
+		if slot.cp == 0 && slot.gid == 0 {
+			return nil // 空槽终止探测
+		}
+		i = (i + 1) % cap
+	}
+}
+
+slotFindById :: proc(font_h : mem.Handle, gid : u16) -> ^GlyphSlot {
+	font := GetFont(font_h)
+	if font == nil {
+		return nil
+	}
+	cap := len(font.slots)
+	if cap == 0 {
+		return nil
+	}
+	i := int(uint(gid) % uint(cap))
+	for {
+		slot := &font.slots[i]
+		if slot.gid == gid {
+			return slot
+		}
+		if slot.cp == 0 && slot.gid == 0 {
 			return nil // 空槽终止探测
 		}
 		i = (i + 1) % cap
@@ -251,10 +362,11 @@ slotInsert :: proc(font_h : mem.Handle, slot : GlyphSlot) -> bool {
 			return false
 		}
 	}
-	i := int(uint(slot.cp) % uint(len(font.slots)))
+	key := uint(slot.cp) if slot.cp != 0 else uint(slot.gid)
+	i := int(key % uint(len(font.slots)))
 	for {
 		s := &font.slots[i]
-		if s.cp == 0 {
+		if s.cp == 0 && s.gid == 0 {
 			s^ = slot
 			font.slot_count += 1
 			return true
@@ -272,13 +384,14 @@ slotGrow :: proc(font_h : mem.Handle) -> bool {
 	font.slots = make([dynamic]GlyphSlot, len(old) * 2)
 	font.slot_count = 0
 	for slot in old {
-		if slot.cp == 0 {
+		if slot.cp == 0 && slot.gid == 0 {
 			continue
 		}
-		i := int(uint(slot.cp) % uint(len(font.slots)))
+		key := uint(slot.cp) if slot.cp != 0 else uint(slot.gid)
+		i := int(key % uint(len(font.slots)))
 		for {
 			s := &font.slots[i]
-			if s.cp == 0 {
+			if s.cp == 0 && s.gid == 0 {
 				s^ = slot
 				font.slot_count += 1
 				break
@@ -291,12 +404,14 @@ slotGrow :: proc(font_h : mem.Handle) -> bool {
 }
 
 glyphFromSlot :: proc(slot : ^GlyphSlot) -> Glyph {
+	// slot.xoff/yoff = stbtt box 偏移(x0/y0,相对字形原点);
+	// UV 已指向图集内容区,quad 只画内容区
 	return Glyph {
 		advance = slot.advance,
 		bitmap_w = f32(slot.w),
 		bitmap_h = f32(slot.h),
-		xoff = slot.xoff - ATLAS_PAD, // 位图内容区在 quad 里的位置 = 像素偏移 - 边距
-		yoff = slot.yoff - ATLAS_PAD,
+		xoff = slot.xoff,
+		yoff = slot.yoff,
 		uv0_x = slot.u0, uv0_y = slot.v0, uv1_x = slot.u1, uv1_y = slot.v1,
 	}
 }
@@ -319,52 +434,94 @@ glyphFaceIndex :: proc(font_h : mem.Handle, cp : rune) -> (index : int, ok : boo
 	return 0, false
 }
 
-glyphRasterize :: proc(font_h : mem.Handle, cp : rune) -> bool {
+// 光栅化公共:1x 分辨率,stbtt 解析覆盖率抗锯齿(每像素按字形覆盖面积算灰度,
+// 无需超采样)。oversample=1:不用 subpixel prefilter,避免其相位让同一笔画
+// 在不同字形里灰度分布不同(横线粗细/明暗不一,FreeType 靠 hinting 才一致)。
+rasterCommon :: proc(font_h : mem.Handle, face : ^Face, cp : rune, gid : c.int) -> (GlyphSlot, bool) {
 	font := GetFont(font_h)
 	if font == nil {
-		return false
+		return {}, false
 	}
-	face_idx, ok := glyphFaceIndex(font_h, cp)
-	if !ok {
-		return false
-	}
-	face := &font.faces[face_idx]
+	scale := face.scale
 
 	x0, y0, x1, y1 : c.int
-	stbtt.GetCodepointBitmapBox(&face.info, cp, face.scale, face.scale, &x0, &y0, &x1, &y1)
+	if gid != 0 {
+		stbtt.GetGlyphBitmapBox(&face.info, gid, scale, scale, &x0, &y0, &x1, &y1)
+	} else {
+		stbtt.GetCodepointBitmapBox(&face.info, cp, scale, scale, &x0, &y0, &x1, &y1)
+	}
 	w := x1 - x0
 	h := y1 - y0
 	if w == 0 || h == 0 {
-		return false // 空白字形(空格等):不入图集,渲染层跳过
+		return {}, false // 空白字形(空格等):不入图集
 	}
 	advance : c.int
-	stbtt.GetCodepointHMetrics(&face.info, cp, &advance, nil)
+	if gid != 0 {
+		stbtt.GetGlyphHMetrics(&face.info, gid, &advance, nil)
+	} else {
+		stbtt.GetCodepointHMetrics(&face.info, cp, &advance, nil)
+	}
 
 	x, y, alloc_ok := atlasAlloc(&font.atlas, u32(w) + 2 * ATLAS_PAD, u32(h) + 2 * ATLAS_PAD)
 	if !alloc_ok {
 		atlasGrow(font_h) // 图集满 → 扩容并重放全部缓存字形
 		x, y, alloc_ok = atlasAlloc(&font.atlas, u32(w) + 2 * ATLAS_PAD, u32(h) + 2 * ATLAS_PAD)
 		if !alloc_ok {
-			return false
+			return {}, false
 		}
 	}
-	// 位图直接画入图集 buffer(带 pad),零中间拷贝;超采样抗锯齿 + 亚像素偏移对齐像素边界
+	// 位图直接画入图集 buffer(带 pad);oversample=1(覆盖率抗锯齿已平滑)
 	sub_x, sub_y : f32
 	row_start := int(y + ATLAS_PAD) * int(font.atlas.width) + int(x + ATLAS_PAD)
-	stbtt.MakeCodepointBitmapSubpixelPrefilter(&face.info, cast([^]byte)&font.atlas.pixels[row_start], w, h, c.int(font.atlas.width), face.scale, face.scale, 0, 0, b32(font.antialias), b32(font.antialias), &sub_x, &sub_y, cp)
+	if gid != 0 {
+		stbtt.MakeGlyphBitmapSubpixelPrefilter(&face.info, cast([^]byte)&font.atlas.pixels[row_start], w, h, c.int(font.atlas.width), scale, scale, 0, 0, 1, 1, &sub_x, &sub_y, gid)
+	} else {
+		stbtt.MakeCodepointBitmapSubpixelPrefilter(&face.info, cast([^]byte)&font.atlas.pixels[row_start], w, h, c.int(font.atlas.width), scale, scale, 0, 0, true, true, &sub_x, &sub_y, cp)
+	}
 	atlasUpload(&font.atlas, x, y, u32(w) + 2 * ATLAS_PAD, u32(h) + 2 * ATLAS_PAD)
 
-	return slotInsert(font_h, GlyphSlot {
-		cp = cp,
-		face_index = u8(face_idx),
+	return GlyphSlot {
 		w = u16(w), h = u16(h),
 		xoff = f32(x0) + sub_x, yoff = f32(y0) + sub_y,
-		advance = f32(advance) * face.scale,
+		advance = f32(advance) * scale,
 		u0 = f32(x + ATLAS_PAD) / f32(font.atlas.width),
 		v0 = f32(y + ATLAS_PAD) / f32(font.atlas.height),
 		u1 = f32(x + ATLAS_PAD + u32(w)) / f32(font.atlas.width),
 		v1 = f32(y + ATLAS_PAD + u32(h)) / f32(font.atlas.height),
-	})
+	}, true
+}
+
+glyphRasterize :: proc(font_h : mem.Handle, cp : rune) -> bool {
+	font := GetFont(font_h)
+	if font == nil {
+		return false
+	}
+	face_idx, fok := glyphFaceIndex(font_h, cp)
+	if !fok {
+		return false
+	}
+	slot, sok := rasterCommon(font_h, &font.faces[face_idx], cp, 0)
+	if !sok {
+		return false
+	}
+	slot.cp = cp
+	slot.face_index = u8(face_idx)
+	return slotInsert(font_h, slot)
+}
+
+// 按内部 glyph id 光栅化(连体字形,只属于主 face)
+glyphRasterizeById :: proc(font_h : mem.Handle, gid : u16) -> bool {
+	font := GetFont(font_h)
+	if font == nil {
+		return false
+	}
+	slot, sok := rasterCommon(font_h, &font.faces[0], 0, c.int(gid))
+	if !sok {
+		return false
+	}
+	slot.gid = gid
+	slot.face_index = 0
+	return slotInsert(font_h, slot)
 }
 
 // ---------------------------------------------------------------------------
@@ -432,7 +589,7 @@ atlasGrow :: proc(font_h : mem.Handle) {
 
 	for i in 0 ..< len(font.slots) {
 		slot := &font.slots[i]
-		if slot.cp == 0 {
+		if slot.cp == 0 && slot.gid == 0 {
 			continue
 		}
 		face := &font.faces[slot.face_index]
@@ -442,7 +599,11 @@ atlasGrow :: proc(font_h : mem.Handle) {
 		}
 		row_start := int(y + ATLAS_PAD) * int(a.width) + int(x + ATLAS_PAD)
 		sub_x, sub_y : f32
-		stbtt.MakeCodepointBitmapSubpixelPrefilter(&face.info, cast([^]byte)&a.pixels[row_start], c.int(slot.w), c.int(slot.h), c.int(a.width), face.scale, face.scale, 0, 0, b32(font.antialias), b32(font.antialias), &sub_x, &sub_y, slot.cp)
+		if slot.gid != 0 {
+			stbtt.MakeGlyphBitmapSubpixelPrefilter(&face.info, cast([^]byte)&a.pixels[row_start], c.int(slot.w), c.int(slot.h), c.int(a.width), face.scale, face.scale, 0, 0, 1, 1, &sub_x, &sub_y, c.int(slot.gid))
+		} else {
+			stbtt.MakeCodepointBitmapSubpixelPrefilter(&face.info, cast([^]byte)&a.pixels[row_start], c.int(slot.w), c.int(slot.h), c.int(a.width), face.scale, face.scale, 0, 0, true, true, &sub_x, &sub_y, slot.cp)
+		}
 		slot.u0 = f32(x + ATLAS_PAD) / f32(a.width)
 		slot.v0 = f32(y + ATLAS_PAD) / f32(a.height)
 		slot.u1 = f32(x + ATLAS_PAD + u32(slot.w)) / f32(a.width)

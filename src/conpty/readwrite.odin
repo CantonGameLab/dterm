@@ -17,6 +17,7 @@ ReadWriteData :: struct {
 	read_buffer : [MAX_READ_BUFFER]byte,
 	head        : u32, // 仅主循环写
 	tail        : u32, // 仅读线程写
+	dead        : b32, // 读线程退出(管道断开)标记:主循环检测,避免界面永久冻结
 }
 
 read_write_datas : [MAX_CONPTY_SLOTS]ReadWriteData
@@ -31,6 +32,7 @@ readThreadProc :: proc(t: ^thread.Thread) {
 	read_write_data := &read_write_datas[h.id]
 	buf := make([]byte, 8 * 1024)
 	defer delete(buf)
+	defer sync.atomic_store_explicit(&read_write_data.dead, true, .Release)
 	for {
 		n, ok := readConptyOutput(conpty_context, buf)
 		if !ok {
@@ -38,6 +40,15 @@ readThreadProc :: proc(t: ^thread.Thread) {
 		}
 		ringPush(read_write_data, buf[:n])
 	}
+}
+
+// 读线程是否还活着(管道是否断开);主循环每帧检查
+IsReadThreadAlive :: proc(h : mem.Handle) -> bool {
+	read_write_data := GetReadWriteData(h)
+	if read_write_data == nil {
+		return false
+	}
+	return !sync.atomic_load_explicit(&read_write_data.dead, .Acquire)
 }
 
 GetReadWriteData :: proc(h : mem.Handle) -> ^ReadWriteData {
@@ -93,6 +104,7 @@ StartReadThread :: proc(h : mem.Handle) -> bool {
 	}
 	read_write_data.handle = h
 	read_write_data.head, read_write_data.tail = 0, 0
+	read_write_data.dead = false
 	read_write_data.thread = thread.create(readThreadProc)
 	if read_write_data.thread == nil {
 		return false

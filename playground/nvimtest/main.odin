@@ -206,6 +206,75 @@ main :: proc() {
 	c = cv.GetConsole(console_h)
 	check("wide: CUB skips continuation", int(c.cursor_col), 0)
 
+	// 12. 补全窗口场景:背景 SGR + 文本 + EL 0 → 行尾用背景填充成完整矩形
+	feed(console_h, "\x1b[?1049h\x1b[2J\x1b[H")
+	feed(console_h, "\x1b[5;5H\x1b[48;5;236m\x1b[38;5;252mitem1\x1b[K")
+	feed(console_h, "\x1b[6;5H\x1b[48;5;236m\x1b[38;5;252mitem2\x1b[K")
+	feed(console_h, "\x1b[7;5H\x1b[48;5;236m\x1b[38;5;252mitem3\x1b[K")
+	feed(console_h, "\x1b[0m")
+	c = cv.GetConsole(console_h)
+	tb = cv.GetTermBuffer(c.active_term_buffer_id)
+	check("pum: item1 at row4 col4", int(tb.lines[4].cells[4].cp == 'i'), 1)
+	check("pum: text fg 252", int(tb.lines[4].cells[4].fg == 0xD0D0D0), 1)
+	check("pum: text bg 236", int(tb.lines[4].cells[4].bg == 0x303030), 1)
+	check("pum: erased tail keeps bg", int(tb.lines[4].cells[79].bg == 0x303030), 1)
+	check("pum: tail has no cp", int(tb.lines[4].cells[79].cp == 0), 1)
+	check("pum: row width 80", int(len(tb.lines[4].cells)), 80)
+	check("pum: row6 item2", int(tb.lines[5].cells[4].cp == 'i'), 1)
+	// 无背景时 EL:擦除 cell 背景应为默认(渲染不画)
+	feed(console_h, "\x1b[9;1Hab\x1b[0m\x1b[K")
+	c = cv.GetConsole(console_h)
+	tb = cv.GetTermBuffer(c.active_term_buffer_id)
+	check("el default bg", int(tb.lines[8].cells[5].bg == cv.DEFAULT_COLOR), 1)
+	check("el default: no cp", int(tb.lines[8].cells[5].cp == 0), 1)
+
+	// 13. Origin mode(CSI ?6h):光标定位相对滚动区
+	feed(console_h, "\x1b[?1049h\x1b[2J\x1b[5;10r\x1b[?6h")
+	feed(console_h, "\x1b[H") // CUP(1,1) → 滚动区顶(0-based 4)
+	c = cv.GetConsole(console_h)
+	check("origin: CUP home at scroll top", int(c.cursor_row), 4)
+	feed(console_h, "\x1b[6;1H") // CUP(6,1) → 滚动区内第 6 行(0-based 9)
+	c = cv.GetConsole(console_h)
+	check("origin: CUP 6 at row9", int(c.cursor_row), 9)
+	feed(console_h, "\x1b[24;1H") // CUP(24,1) → 限制在滚动区底(0-based 9)
+	c = cv.GetConsole(console_h)
+	check("origin: CUP clamped to bottom", int(c.cursor_row), 9)
+	feed(console_h, "\x1b[10A") // CUU 10 → 滚动区顶(0-based 4)
+	c = cv.GetConsole(console_h)
+	check("origin: CUU clamped to top", int(c.cursor_row), 4)
+	feed(console_h, "\x1b[10B") // CUD 10 → 滚动区底(0-based 9)
+	c = cv.GetConsole(console_h)
+	check("origin: CUD clamped to bottom", int(c.cursor_row), 9)
+	// DECSTBM 在 origin 下:光标移到新滚动区 home
+	feed(console_h, "\x1b[3;8r")
+	c = cv.GetConsole(console_h)
+	check("origin: DECSTBM moves to home", int(c.cursor_row), 2)
+	// 关闭 origin:绝对定位
+	feed(console_h, "\x1b[?6l\x1b[H")
+	c = cv.GetConsole(console_h)
+	check("origin off: CUP absolute", int(c.cursor_row), 0)
+
+	// 14. DECCOLM(CSI ?3h):132 列模式
+	feed(console_h, "\x1b[?3h")
+	c = cv.GetConsole(console_h)
+	check("132: cols=132", int(c.cols), 132)
+	check("132: cursor home", int(c.cursor_row), 0)
+	feed(console_h, "\x1b[1;1H")
+	for i in 0 ..< 132 {
+		feed(console_h, "A")
+	}
+	c = cv.GetConsole(console_h)
+	tb = cv.GetTermBuffer(c.active_term_buffer_id)
+	check("132: 132 chars no wrap", int(c.cursor_row), 0)
+	check("132: cursor at 131", int(c.cursor_col), 131)
+	check("132: line width", int(len(tb.lines[0].cells)), 132)
+	// 回到 80 列
+	feed(console_h, "\x1b[?3l")
+	c = cv.GetConsole(console_h)
+	check("80: cols=80", int(c.cols), 80)
+	check("80: cursor home", int(c.cursor_row), 0)
+	check("80: screen cleared", int(len(tb.lines)), 0)
+
 	if fail_count == 0 {
 		fmt.println("ALL PASS")
 	} else {

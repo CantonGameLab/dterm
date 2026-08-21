@@ -1,9 +1,11 @@
 package canvas
 
 import ct "../conpty"
+import fnt "../font"
 import mem "../memory"
 import vp "../vtparse"
 import "core:fmt"
+import "core:math"
 
 // 双层屏幕模型:
 //   内容层 TermBuffer:一"页"的所有行(含滚动历史)。
@@ -289,10 +291,52 @@ ConsoleUpdateLayout :: proc(console_h : mem.Handle, t : Transform, cell_w, cell_
 	}
 	rows := max(1, int(t.height / cell_h))
 	cols := max(1, int(t.width / cell_w))
+	if console.vt.deccolm {
+		cols = 132 // DECCOLM 132 列模式覆盖布局计算
+	}
 	applyConsoleSize(console, u16(rows), u16(cols))
-	console.origin_x = t.position_x + (t.width - f32(cols) * cell_w) * 0.5
+	if console.vt.deccolm {
+		console.origin_x = t.position_x // 132 列超出窗口:左对齐
+	} else {
+		console.origin_x = t.position_x + (t.width - f32(cols) * cell_w) * 0.5
+	}
 	console.origin_y = t.position_y + (t.height - f32(rows) * cell_h) * 0.5
+	// 网格起点取整到像素:origin 带 .5 时背景矩形与字形(各自取整)会错位 1px
+	console.origin_x = math.round(console.origin_x)
+	console.origin_y = math.round(console.origin_y)
 	return true
+}
+
+// 遍历窗口树,更新每个 Console 的布局(尺寸变化时 Resize ConPTY)并拉取输出。
+// 由 main 每帧调用一次;递归属于树结构操作,归 canvas 管理。
+ConsoleUpdateTree :: proc(node_h : mem.Handle) {
+	node := GetWindowTreeNode(node_h)
+	if node == nil {
+		return
+	}
+	if !node.is_leaf {
+		ConsoleUpdateTree(node.left_son_id)
+		ConsoleUpdateTree(node.right_son_id)
+		return
+	}
+	for i in 0 ..< len(node.iterms) {
+		if node.iterms[i].type != ItermType.Console {
+			continue
+		}
+		console_h := node.iterms[i].console_id
+		console := GetConsole(console_h)
+		if console == nil {
+			continue
+		}
+		t := ItermAbsoluteTransform(node_h, i)
+		m := fnt.GetMetrics(console.font_id)
+		old_rows, old_cols := console.rows, console.cols
+		ConsoleUpdateLayout(console_h, t, m.cell_width, m.cell_height)
+		if console.rows != old_rows || console.cols != old_cols {
+			ct.Resize(console.conpty_handle, console.cols, console.rows)
+		}
+		UpdateConsole(console_h)
+	}
 }
 
 ConsoleSetCursor :: proc(console_h : mem.Handle, row, col : u16) -> bool {
@@ -385,11 +429,11 @@ ConsoleWriteRune :: proc(console_h : mem.Handle, cp : rune, style : CellStyle) -
 	}
 	line := &tb.lines[row]
 	for len(line.cells) <= col + w - 1 {
-		append(&line.cells, Cell{})
+		append(&line.cells, Cell { style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR } })
 	}
 	line.cells[col] = Cell { cp = cp, style = style, wide = w == 2 }
 	if w == 2 {
-		line.cells[col + 1] = Cell { wide = true } // 续列
+		line.cells[col + 1] = Cell { style = style, wide = true } // 续列继承样式(背景)
 	}
 
 	console.cursor_col += u16(w)

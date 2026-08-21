@@ -59,6 +59,12 @@ drawConsole :: proc(node_h : mem.Handle, iterm_index : int, theme : Theme) {
 	}
 	visible_top := max(0, len(tb.lines) - int(console.rows) - int(tb.scroll_offset))
 
+	// 行连体 shaping 缓冲:按最大列宽一次性分配,逐行复用
+	shaped := make([dynamic]u16, int(console.cols))
+	orig := make([dynamic]u16, int(console.cols))
+	defer delete(shaped)
+	defer delete(orig)
+
 	for r in 0 ..< int(console.rows) {
 		line_idx := visible_top + r
 		if line_idx >= len(tb.lines) {
@@ -66,15 +72,53 @@ drawConsole :: proc(node_h : mem.Handle, iterm_index : int, theme : Theme) {
 		}
 		line := &tb.lines[line_idx]
 		col_limit := min(int(console.cols), len(line.cells))
+
+		// 逐行连体 shaping:cell cp → 主字体 glyph id,ShapeLine 原地替换
+		// 输出与输入一一对应,替换后的 id 用 GetGlyphById 绘制
+		resize(&shaped, col_limit)
+		resize(&orig, col_limit)
 		for c in 0 ..< col_limit {
+			g := fnt.GlyphIndex(console.font_id, line.cells[c].cp)
+			orig[c] = g
+			shaped[c] = g
+		}
+		fnt.ShapeLine(console.font_id, &shaped)
+
+		// 连体合并(未来 type4)会缩短数组;绘制按缩短后的长度截断
+		draw_limit := min(col_limit, len(shaped))
+		// 两遍绘制:先全部背景,再全部字形。
+		// 连体字形位图会溢出到相邻格(如 --- 的 32px 连体),若逐格"背景+字形"交替,
+		// 后格的背景矩形会盖住前格连体字形的溢出部分(高亮选中行尤其明显)。
+		for c in 0 ..< draw_limit {
 			cell := line.cells[c]
-			if cell.cp == 0 && !cell.wide {
-				continue // 纯空白格
+			bg := resolveColor(cell.bg, theme.bg)
+			if cell.reverse {
+				bg = resolveColor(cell.fg, theme.fg)
 			}
-			// 宽字符:本格画字形 + 背景,续列(cp=0, wide)只画背景(共 2 格)
+			if bg != theme.bg {
+				cx := console.origin_x + f32(c) * m.cell_width
+				cy := console.origin_y + f32(r) * m.cell_height
+				DrawRect(cx, cy, m.cell_width, m.cell_height, bg)
+			}
+		}
+		for c in 0 ..< draw_limit {
+			cell := line.cells[c]
+			if cell.cp == 0 {
+				continue // 空白格/宽字符续列:无字形
+			}
 			cx := console.origin_x + f32(c) * m.cell_width
 			cy := console.origin_y + f32(r) * m.cell_height
-			drawCell(console.font_id, cell, cx, cy, m, theme)
+			fg := resolveColor(cell.fg, theme.fg)
+			if cell.reverse {
+				fg = resolveColor(cell.bg, theme.bg)
+			}
+			gid := shaped[c]
+			if gid != 0 && gid != orig[c] {
+				// 连体替换:画替换字形
+				DrawGlyphById(console.font_id, gid, cx, cy + m.ascent, fg)
+			} else {
+				DrawRune(console.font_id, cell.cp, cx, cy + m.ascent, fg)
+			}
 		}
 	}
 
@@ -97,18 +141,6 @@ drawConsole :: proc(node_h : mem.Handle, iterm_index : int, theme : Theme) {
 			}
 		}
 	}
-}
-
-drawCell :: proc(font_h : mem.Handle, cell : cv.Cell, x, y : f32, m : fnt.Metrics, theme : Theme) {
-	fg := resolveColor(cell.fg, theme.fg)
-	bg := resolveColor(cell.bg, theme.bg)
-	if cell.reverse {
-		fg, bg = bg, fg
-	}
-	if bg != theme.bg {
-		DrawRect(x, y, m.cell_width, m.cell_height, bg)
-	}
-	DrawRune(font_h, cell.cp, x, y + m.ascent, fg)
 }
 
 resolveColor :: proc(c, default : u32) -> u32 {

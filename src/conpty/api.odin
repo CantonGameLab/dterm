@@ -12,6 +12,39 @@ PSEUDOCONSOLE_INHERIT_CURSOR :: 1
 PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE :: 0x00020016 //虚拟终端属性记号
 STILL_ACTIVE :: 0x00000103 // GetExitCodeProcess 中进程仍存活
 
+// Job Object(进程树管理):core:sys/windows 未绑定,此处静态绑定 kernel32
+JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE :: 0x2000
+JOBOBJECTINFOCLASS_BASIC_ACCOUNTING :: 1
+JOBOBJECTINFOCLASS_EXTENDED_LIMIT :: 9
+
+// 查询信息类 JobObjectBasicAccountingInformation 的返回结构
+JobObjectBasicAccountingInfo :: struct {
+	total_user_time, total_kernel_time : i64,
+	this_period_total_user_time, this_period_total_kernel_time : i64,
+	total_page_fault_count, total_processes : u32,
+	active_processes, total_terminated_processes : u32,
+}
+
+// SetInformationJobObject 类 JobObjectExtendedLimitInformation 的输入结构
+// (仅 LimitFlags 字段有意义,其余保持 0)
+JobObjectBasicLimitInformation :: struct {
+	per_process_user_time_limit, per_process_kernel_time_limit : i64,
+	limit_flags : u32,
+	minimum_working_set_size, maximum_working_set_size : win.SIZE_T,
+	active_process_limit : u32,
+	affinity : win.SIZE_T,
+	priority_class : u32,
+	scheduling_class : u32,
+}
+
+JobObjectExtendedLimitInfo :: struct {
+	basic_limit : JobObjectBasicLimitInformation,
+	io_info     : [7]u64, // IO_COUNTERS
+	process_mem : [3]win.SIZE_T,
+	job_mem     : [4]win.SIZE_T,
+	peer_handle : win.HANDLE,
+}
+
 STARTUPINFOEXW :: struct {
 	StartupInfo: win.STARTUPINFOW,
 	lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
@@ -58,6 +91,15 @@ foreign kernel32 {
 	DeleteProcThreadAttributeList :: proc(
 		lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
 	) ---
+
+	@(link_name="CreateJobObjectW")
+	CreateJobObjectW :: proc(lpJobAttributes: ^win.SECURITY_ATTRIBUTES, lpName: win.LPCWSTR) -> win.HANDLE ---
+	@(link_name="SetInformationJobObject")
+	SetInformationJobObject :: proc(hJob: win.HANDLE, JobObjectInformationClass: i32, lpJobObjectInformation: rawptr, cbJOB_OBJECT_INFOLength: win.DWORD) -> i32 ---
+	@(link_name="AssignProcessToJobObject")
+	AssignProcessToJobObject :: proc(hJob, hProcess: win.HANDLE) -> i32 ---
+	@(link_name="QueryInformationJobObject")
+	QueryInformationJobObject :: proc(hJob: win.HANDLE, JobObjectInformationClass: i32, lpJobObjectInformation: rawptr, cbJOB_OBJECT_INFOLength: win.DWORD, lpReturnLength: ^win.DWORD) -> i32 ---
 }
 
 createPseudoConsole :: proc(

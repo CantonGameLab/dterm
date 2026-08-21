@@ -151,7 +151,8 @@ doAction :: proc(p : ^Parser, action : Action, ch : u8) {
 			p.num_intermediate_chars += 1
 		}
 	case .Param:
-		if ch == ';' {
+		if ch == ';' || ch == ':' {
+			// 分号/冒号都是参数分隔;冒号 = 子参数(xterm 新式 SGR)
 			if p.num_params < MAX_PARAMS {
 				p.num_params += 1
 				p.params[p.num_params - 1] = 0
@@ -297,8 +298,10 @@ tr_csi_param := [?]Transition{
 	{0x1C, 0x1F, .Execute, .NoChange},
 	{0x30, 0x39, .Param, .NoChange},
 	{0x3B, 0x3B, .Param, .NoChange},
+	// 冒号 = 子参数分隔(xterm 新式 SGR 如 38:2::r:g:b、4:3m)。
+	// 按普通参数分隔处理,SGR 层再解释(与分号同语义,空字段为 0)。
+	{0x3A, 0x3A, .Param, .NoChange},
 	{0x7F, 0x7F, .Ignore, .NoChange},
-	{0x3A, 0x3A, .None, .CsiIgnore},
 	{0x3C, 0x3F, .None, .CsiIgnore},
 	{0x20, 0x2F, .Collect, .CsiIntermediate},
 	{0x40, 0x7E, .CsiDispatch, .Ground},

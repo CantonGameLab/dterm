@@ -9,6 +9,7 @@ import fnt "../font"
 import mem "../memory"
 import "core:c"
 import "core:fmt"
+import "core:math"
 
 INIT_WINDOW_WIDTH :: 1920
 INIT_WINDOW_HEIGHT :: 1080
@@ -189,6 +190,19 @@ DrawRune :: proc(font_h : mem.Handle, cp : rune, x, y : f32, color : u32) -> (ad
 	if !ok {
 		return fnt.GetMetrics(font_h).cell_width
 	}
+	return pushGlyph(font_h, g, x, y, color)
+}
+
+// 内部 glyph id 字形(连体替换结果),(x, y) = 基线位置
+DrawGlyphById :: proc(font_h : mem.Handle, gid : u16, x, y : f32, color : u32) -> (advance : f32) {
+	g, ok := fnt.GetGlyphById(font_h, gid)
+	if !ok {
+		return fnt.GetMetrics(font_h).cell_width
+	}
+	return pushGlyph(font_h, g, x, y, color)
+}
+
+pushGlyph :: proc(font_h : mem.Handle, g : fnt.Glyph, x, y : f32, color : u32) -> (advance : f32) {
 	tex := fnt.GetAtlasTexture(font_h)
 	pushQuad(tex, x + g.xoff, y + g.yoff, x + g.xoff + g.bitmap_w, y + g.yoff + g.bitmap_h, g.uv0_x, g.uv0_y, g.uv1_x, g.uv1_y, color)
 	return g.advance
@@ -217,16 +231,21 @@ pushQuad :: proc(tex : u32, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32) {
 	if quad_count >= MAX_QUADS {
 		flushBatch()
 	}
+	// 坐标取整对齐像素网格:字形位图内容已含亚像素偏移(sub_x 相位补偿),
+	// 四舍五入后 1:1 采样清晰,且字形回到设计位置(floor 会整体左移 1px,
+	// 让贴格子边缘的圆角字符相对高亮背景错位)
+	fx0, fy0 := math.round(x0), math.round(y0)
+	fx1, fy1 := math.round(x1), math.round(y1)
 	r := f32(color >> 16 & 0xFF) / 255
 	g := f32(color >> 8 & 0xFF) / 255
 	b := f32(color & 0xFF) / 255
 	base := quad_count * 6
-	quad_verts[base + 0] = Vertex { x0, y0, u0, v0, r, g, b, 1 }
-	quad_verts[base + 1] = Vertex { x1, y0, u1, v0, r, g, b, 1 }
-	quad_verts[base + 2] = Vertex { x1, y1, u1, v1, r, g, b, 1 }
-	quad_verts[base + 3] = Vertex { x1, y1, u1, v1, r, g, b, 1 }
-	quad_verts[base + 4] = Vertex { x0, y1, u0, v1, r, g, b, 1 }
-	quad_verts[base + 5] = Vertex { x0, y0, u0, v0, r, g, b, 1 }
+	quad_verts[base + 0] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
+	quad_verts[base + 1] = Vertex { fx1, fy0, u1, v0, r, g, b, 1 }
+	quad_verts[base + 2] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
+	quad_verts[base + 3] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
+	quad_verts[base + 4] = Vertex { fx0, fy1, u0, v1, r, g, b, 1 }
+	quad_verts[base + 5] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
 	quad_count += 1
 }
 

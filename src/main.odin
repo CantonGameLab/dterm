@@ -7,7 +7,6 @@ import ev "event"
 import inp "input"
 import fnt "font"
 import rd "render"
-import mem "memory"
 import "core:fmt"
 
 main :: proc() {
@@ -25,14 +24,13 @@ main :: proc() {
 	w, h := rd.GetWindowSize()
 	cv.WindowTreeSetRootSize(w, h)
 
-	font_h, font_ok := fnt.LoadFont("resource/font/Go-Mono/GoMonoNerdFontMono-Regular.ttf", 50)
+	font_h, font_ok := fnt.LoadFont("./resource/font/CascadiaCode/CaskaydiaCoveNerdFont-Regular.ttf", 40)
 	if !font_ok {
 		fmt.eprintln("LoadFont failed")
 		return
 	}
 	defer fnt.DestroyFont(font_h)
-
-	conpty_h, conpty_ok := ct.CreateConptyContext({80, 24}, "cmd.exe")
+	conpty_h, conpty_ok := ct.CreateConptyContext({80, 24}, "C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start")
 	if !conpty_ok {
 		fmt.eprintln("CreateConptyContext failed")
 		return
@@ -66,6 +64,16 @@ main :: proc() {
 		if ev.Poll() {
 			break
 		}
+		// 会话结束检测:Job 内进程树归零(exit 后所有进程退出)或读管道断开。
+		// 注意:ConPTY 读管道在子进程退出后不会自动 EOF(conhost 持有写端),
+		// 读线程断开只作兜底;主信号是 Job 计数(msys2_shell.cmd -no-start
+		// 同步运行 bash,bash 退出后 cmd 包装才退出,Job 归零即会话结束)。
+		jobs := ct.JobActiveProcesses(conpty_h)
+		if jobs == 0 || !ct.IsReadThreadAlive(conpty_h) {
+			update() // 消费环形缓冲中最后的输出(exit 前的内容)
+			fmt.println("conpty session ended")
+			break
+		}
 		// 本帧输入(文本 + 控制字符/转义序列)发给 ConPTY
 		if buf := inp.TakeText(); len(buf) > 0 {
 			ct.WriteConptyInput(conpty_h, buf)
@@ -77,37 +85,7 @@ main :: proc() {
 	}
 }
 
-// 更新步:遍历树,对每个 Console 更新布局 + 拉取 ConPTY 输出
+// 更新步:树遍历 + Console 布局/输出更新由 canvas 统一管理
 update :: proc() {
-	updateWalk(cv.WindowTreeRoot())
-}
-
-updateWalk :: proc(node_h : mem.Handle) {
-	node := cv.GetWindowTreeNode(node_h)
-	if node == nil {
-		return
-	}
-	if !node.is_leaf {
-		updateWalk(node.left_son_id)
-		updateWalk(node.right_son_id)
-		return
-	}
-	for i in 0 ..< len(node.iterms) {
-		if node.iterms[i].type != cv.ItermType.Console {
-			continue
-		}
-		console_h := node.iterms[i].console_id
-		console := cv.GetConsole(console_h)
-		if console == nil {
-			continue
-		}
-		t := cv.ItermAbsoluteTransform(node_h, i)
-		m := fnt.GetMetrics(console.font_id)
-		old_rows, old_cols := console.rows, console.cols
-		cv.ConsoleUpdateLayout(console_h, t, m.cell_width, m.cell_height)
-		if console.rows != old_rows || console.cols != old_cols {
-			ct.Resize(console.conpty_handle, console.cols, console.rows)
-		}
-		cv.UpdateConsole(console_h)
-	}
+	cv.ConsoleUpdateTree(cv.WindowTreeRoot())
 }

@@ -17,6 +17,8 @@ VtState :: struct {
 	scroll_top, scroll_bottom : u16,
 	autowrap : bool,
 	wrap_pending : bool, // 写满最后一列:停在该列,下一字符才折行(xterm 语义)
+	origin_mode : bool,  // DECOM(?6):光标定位相对滚动区,且限制在滚动区内
+	deccolm : bool,      // DECCOLM(?3):132 列模式
 	cursor_visible : bool,
 	cursor_style : u8,     // DECSCUSR:0=默认 1=闪烁块 2=稳态块 3=闪烁下划线 4=稳态下划线 5=闪烁竖线 6=稳态竖线
 	alt_term_buffer_id : mem.Handle, // 0 = 未创建
@@ -269,6 +271,8 @@ vtReset :: proc(console_h : mem.Handle) {
 	console.vt.scroll_bottom = console.rows - 1
 	console.vt.autowrap = true
 	console.vt.wrap_pending = false
+	console.vt.origin_mode = false
+	console.vt.deccolm = false
 	console.cursor_row, console.cursor_col = 0, 0
 }
 
@@ -310,6 +314,15 @@ vtPrint :: proc(console_h : mem.Handle, cp : rune) {
 	ConsoleWriteRune(console_h, cp, console.vt.style)
 }
 
+// 行定位(0-based 屏幕行):origin mode 下相对滚动区顶并限制在区内,否则绝对
+vtTargetRow :: proc(console : ^Console, p0 : int) -> int {
+	if console.vt.origin_mode {
+		top := int(console.vt.scroll_top)
+		return top + clamp(p0 - 1, 0, int(console.vt.scroll_bottom) - top)
+	}
+	return clamp(p0 - 1, 0, int(console.rows) - 1)
+}
+
 // ---------------------------------------------------------------------------
 // CSI
 // ---------------------------------------------------------------------------
@@ -349,19 +362,27 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 	}
 
 	switch final {
-	case 'A': // CUU
+	case 'A': // CUU(origin 下限制在滚动区顶)
 		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUU p0=%d", p0)) }
 		vt.wrap_pending = false
 		n := max(1, p0)
 		screen_row := int(console.cursor_row) - base
-		screen_row = max(int(console.vt.scroll_top), screen_row - n)
+		limit := 0
+		if vt.origin_mode {
+			limit = int(vt.scroll_top)
+		}
+		screen_row = max(limit, screen_row - n)
 		console.cursor_row = u16(base + screen_row)
-	case 'B': // CUD
+	case 'B': // CUD(origin 下限制在滚动区底)
 		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUD p0=%d", p0)) }
 		vt.wrap_pending = false
 		n := max(1, p0)
 		screen_row := int(console.cursor_row) - base
-		screen_row = min(int(console.vt.scroll_bottom), screen_row + n)
+		limit := int(console.rows) - 1
+		if vt.origin_mode {
+			limit = int(vt.scroll_bottom)
+		}
+		screen_row = min(limit, screen_row + n)
 		console.cursor_row = u16(base + screen_row)
 	case 'C': // CUF(跳过宽字符续列)
 		vt.wrap_pending = false
@@ -389,10 +410,10 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 			c = skipWideCol(console, c, -1)
 		}
 		console.cursor_col = u16(c)
-	case 'H', 'f': // CUP(1-based)
+	case 'H', 'f': // CUP(1-based;origin 下相对滚动区顶)
 		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUP p0=%d p1=%d base=%d", p0, p1, base)) }
 		vt.wrap_pending = false
-		row := base + clamp(p0 - 1, int(console.vt.scroll_top), int(console.vt.scroll_bottom))
+		row := base + vtTargetRow(console, p0)
 		col := clamp(p1 - 1, 0, int(console.cols) - 1)
 		console.cursor_row, console.cursor_col = u16(row), u16(col)
 		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUP -> %d,%d", row, col)) }
@@ -411,13 +432,17 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 		}
 	case 'h', 'l': // DEC 模式
 		vtSetMode(console_h, p, final == 'h')
-	case 'r': // 滚动区
+	case 'r': // 滚动区;origin 置位时光标移到滚动区 home
 		top := clamp(p0 - 1, 0, int(console.rows) - 1)
 		bottom := int(console.rows) - 1
 		if p1 > 0 {
 			bottom = clamp(p1 - 1, 0, int(console.rows) - 1)
 		}
 		vt.scroll_top, vt.scroll_bottom = u16(min(top, bottom)), u16(max(top, bottom))
+		if vt.origin_mode {
+			console.cursor_row = u16(base + int(vt.scroll_top))
+			console.cursor_col = 0
+		}
 	case 's': // 存光标
 		vt.saved_cursor_row, vt.saved_cursor_col = console.cursor_row, console.cursor_col
 	case 'u': // 取光标;'?' 私用 = modifyOtherKeys 光标位置报告(应答 \e[?r;cR)
@@ -473,15 +498,19 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 		vtInsertLines(console_h, max(1, p0))
 	case 'M': // DL 删除光标处 n 行
 		vtDeleteLines(console_h, max(1, p0))
-	case 'd': // VPA 行绝对定位
+	case 'd': // VPA 行绝对定位(origin 下相对滚动区)
 		vt.wrap_pending = false
-		console.cursor_row = u16(base + clamp(p0 - 1, 0, int(console.rows) - 1))
+		console.cursor_row = u16(base + vtTargetRow(console, p0))
 	case '`': // HPA 列绝对定位
 		vt.wrap_pending = false
 		console.cursor_col = u16(clamp(p0 - 1, 0, int(console.cols) - 1))
-	case 'e': // VPR 行相对下移
+	case 'e': // VPR 行相对下移(origin 下限制在滚动区底)
 		vt.wrap_pending = false
-		console.cursor_row = u16(min(base + int(console.vt.scroll_bottom), int(console.cursor_row) + max(1, p0)))
+		limit := int(console.rows) - 1
+		if vt.origin_mode {
+			limit = int(vt.scroll_bottom)
+		}
+		console.cursor_row = u16(min(base + limit, int(console.cursor_row) + max(1, p0)))
 	case 'a': // HPR 列相对右移
 		vt.wrap_pending = false
 		console.cursor_col = u16(min(int(console.cols) - 1, int(console.cursor_col) + max(1, p0)))
@@ -502,6 +531,28 @@ vtSetMode :: proc(console_h : mem.Handle, p : ^vp.Parser, set : bool) {
 		mode = p.params[0]
 	}
 	switch mode {
+	case 3: // DECCOLM 80/132 列:切换清屏、光标回 home、滚动区重置
+		vt.deccolm = set
+		TermBufferClear(console.active_term_buffer_id)
+		console.cursor_row, console.cursor_col = 0, 0
+		vt.scroll_top, vt.scroll_bottom = 0, console.rows - 1
+		vt.wrap_pending = false
+		console.cols = set ? 132 : 80
+		ct.Resize(console.conpty_handle, console.cols, console.rows)
+	case 6: // DECOM origin mode:置位光标移到滚动区 home,复位移到左上
+		vt.origin_mode = set
+		tb := GetTermBuffer(console.active_term_buffer_id)
+		b := 0
+		if tb != nil {
+			b = screenBase(console, tb)
+		}
+		if set {
+			console.cursor_row = u16(b + int(vt.scroll_top))
+		} else {
+			console.cursor_row = u16(b)
+		}
+		console.cursor_col = 0
+		vt.wrap_pending = false
 	case 7:
 		vt.autowrap = set
 		if !set {
@@ -563,6 +614,20 @@ vtAltScreen :: proc(console_h : mem.Handle, enter : bool) {
 	}
 }
 
+// 擦除用 cell:带当前 SGR 背景色。xterm 语义:EL/ED/ECH 擦除的区域
+// 用当前背景色填充(补全窗口等依赖此行为形成完整矩形背景)
+eraseCell :: proc(console : ^Console) -> Cell {
+	return Cell { style = { bg = console.vt.style.bg } }
+}
+
+// 行定宽化:确保 line.cells 覆盖到 col(行模型是定宽 cols,擦除/定位需要)。
+// 补的空白格必须是默认样式(零值 bg=0 会被渲染成黑色块)
+lineEnsureCol :: proc(line : ^Line, col : int) {
+	for len(line.cells) <= col {
+		append(&line.cells, Cell { style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR } })
+	}
+}
+
 // mode:0 到行尾 / 1 到行首 / 2 整行
 vtEraseInLine :: proc(console_h : mem.Handle, mode : int) {
 	console := GetConsole(console_h)
@@ -578,20 +643,22 @@ vtEraseInLine :: proc(console_h : mem.Handle, mode : int) {
 		append(&tb.lines, Line{})
 	}
 	line := &tb.lines[row]
+	erase := eraseCell(console)
 	switch mode {
 	case 0:
-		for col in int(console.cursor_col) ..< len(line.cells) {
-			line.cells[col] = {}
+		for col in int(console.cursor_col) ..< int(console.cols) {
+			lineEnsureCol(line, col)
+			line.cells[col] = erase
 		}
 	case 1:
 		for col in 0 ..= int(console.cursor_col) {
-			if col < len(line.cells) {
-				line.cells[col] = {}
-			}
+			lineEnsureCol(line, col)
+			line.cells[col] = erase
 		}
 	case 2:
-		for &cell in line.cells {
-			cell = {}
+		for col in 0 ..< int(console.cols) {
+			lineEnsureCol(line, col)
+			line.cells[col] = erase
 		}
 	}
 }
@@ -639,8 +706,10 @@ vtClearLineAll :: proc(console_h : mem.Handle, row : int) {
 	if row < 0 || row >= len(tb.lines) {
 		return
 	}
-	for &cell in tb.lines[row].cells {
-		cell = {}
+	erase := eraseCell(console)
+	for col in 0 ..< int(console.cols) {
+		lineEnsureCol(&tb.lines[row], col)
+		tb.lines[row].cells[col] = erase
 	}
 }
 
@@ -660,9 +729,14 @@ vtEraseChars :: proc(console_h : mem.Handle, n : int) {
 	}
 	line := &tb.lines[row]
 	start := int(console.cursor_col)
-	end := min(start + n, len(line.cells))
+	end := min(start + n, int(console.cols))
+	erase := eraseCell(console)
+	when VT_DEBUG {
+		fmt.eprintfln("VTDBG ECH n=%d start=%d style.bg=%08X", n, start, console.vt.style.bg)
+	}
 	for i in start ..< end {
-		line.cells[i] = {}
+		lineEnsureCol(line, i)
+		line.cells[i] = erase
 	}
 }
 
@@ -684,8 +758,9 @@ vtDeleteChars :: proc(console_h : mem.Handle, n : int) {
 	col := int(console.cursor_col)
 	nn := min(n, len(line.cells) - col)
 	remove_range(&line.cells, col, col + nn)
+	erase := eraseCell(console)
 	for i in 0 ..< nn {
-		append(&line.cells, Cell{})
+		append(&line.cells, erase)
 	}
 }
 
@@ -705,13 +780,14 @@ vtInsertChars :: proc(console_h : mem.Handle, n : int) {
 	}
 	line := &tb.lines[row]
 	for len(line.cells) < int(console.cols) {
-		append(&line.cells, Cell{})
+		append(&line.cells, Cell { style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR } })
 	}
 	col := int(console.cursor_col)
 	nn := min(n, int(console.cols) - col)
 	copy(line.cells[col + nn:], line.cells[col:int(console.cols) - nn])
+	erase := eraseCell(console)
 	for i in col ..< col + nn {
-		line.cells[i] = {}
+		line.cells[i] = erase
 	}
 }
 
@@ -803,17 +879,21 @@ vtSgr :: proc(console_h : mem.Handle, p : ^vp.Parser) {
 		case 24: style.underline = false
 		case 27: style.reverse = false
 		case 30 ..= 37: style.fg = ANSI16[pp - 30]
-		case 38, 48: // 38;5;n / 38;2;r;g;b
+		case 38, 48: // 38;5;n / 38;2;r;g;b;也兼容冒号子参数 38:2::r:g:b(多一个 colorspace 字段)
 			if i + 1 < len(params) {
 				mode := params[i + 1]
 				if mode == 5 && i + 2 < len(params) {
-					color := ansi256ToRgb(params[i + 2])
+					// 冒号格式 38:5::n 有 4 个参数,分号格式 38;5;n 有 3 个
+					skip := 1 if i + 3 < len(params) else 0
+					color := ansi256ToRgb(params[i + 2 + skip])
 					if pp == 38 { style.fg = color } else { style.bg = color }
-					i += 2
+					i += 2 + skip
 				} else if mode == 2 && i + 4 < len(params) {
-					color := (u32(params[i + 2]) << 16) | (u32(params[i + 3]) << 8) | u32(params[i + 4])
+					// 冒号格式 38:2::r:g:b 有 6 个参数(含 colorspace),分号格式 38;2;r;g;b 有 5 个
+					skip := 1 if i + 5 < len(params) else 0
+					color := (u32(params[i + 2 + skip]) << 16) | (u32(params[i + 3 + skip]) << 8) | u32(params[i + 4 + skip])
 					if pp == 38 { style.fg = color } else { style.bg = color }
-					i += 4
+					i += 4 + skip
 				}
 			}
 		case 39: style.fg = DEFAULT_COLOR
@@ -929,6 +1009,10 @@ vtReplyDecrqm :: proc(console_h : mem.Handle, mode : int) {
 vtQueryMode :: proc(console : ^Console, mode : int) -> int {
 	vt := &console.vt
 	switch mode {
+	case 3:
+		return vt.deccolm ? 1 : 2
+	case 6:
+		return vt.origin_mode ? 1 : 2
 	case 7:
 		return vt.autowrap ? 1 : 2
 	case 25:

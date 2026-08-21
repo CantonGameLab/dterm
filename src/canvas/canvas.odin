@@ -44,6 +44,8 @@ SplitType :: enum u8 {
 WindowTreeNode :: struct {
 	iterms : [dynamic]Iterm,
 
+	main_console_id : u32,
+
 	using transform : Transform,
 
 	frame_width : u32, // 分割条像素宽

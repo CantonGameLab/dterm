@@ -1,10 +1,14 @@
 package conpty
 
 import "core:fmt"
-import "core:c"
 import win "core:sys/windows"
 import mem "../memory"
 
+// Job Object 用途:把整个 ConPTY 进程树(含孙进程,如 opencode 拉起的 node)放进 Job,
+// 会话结束判定 = Job 内活动进程数为 0,而不是只查直接子进程——
+// 直接子进程可能是 cmd 包装(msys2_shell.cmd)提前退出,而真实 shell 还活着;
+// 反过来 opencode 退出后残留 node 子进程,conhost 认为还有连接,读管道不关。
+// 绑定在 api.odin(静态链接 kernel32)。
 
 ConptyContext :: struct {
 	hpc          : HPCON,
@@ -12,9 +16,10 @@ ConptyContext :: struct {
 	write_conpty : win.HANDLE, // 写键盘输入
 	proc_info    : win.PROCESS_INFORMATION,
 	child_procid : win.DWORD,
+	job          : win.HANDLE, // Job Object:跟踪整个进程树,会话结束判定
 }
 
-MAX_CONPTY_SLOTS :: 16
+MAX_CONPTY_SLOTS :: 32
 
 conpty_contexts : mem.GenArray(MAX_CONPTY_SLOTS, ConptyContext)
 
@@ -41,22 +46,25 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string) -> (ctx: ConptyCo
 	main_side_read   : win.HANDLE // 我们读输出
 	conpty_side_write: win.HANDLE // ConPTY 端写(发给子进程)
 
+	// 本地管道句柄:CreatePseudoConsole 后 conhost 已复制副本,CreateProcessW
+	// 也会把 std 句柄复制给子进程,本地副本必须关闭——否则输出管道写端
+	// 永远有句柄,子进程退出后读端不产生 EOF,读线程永久阻塞(exit 卡死根因)
+	defer win.CloseHandle(conpty_side_read)
+	defer win.CloseHandle(conpty_side_write)
+
 	if !win.CreatePipe(&conpty_side_read, &main_side_write, nil, 0) {
 		return
 	}
 	if !win.CreatePipe(&main_side_read, &conpty_side_write, nil, 0) {
-		win.CloseHandle(conpty_side_read)
-		win.CloseHandle(main_side_write)
+		win.CloseHandle(main_side_write) // conpty_side 两个由 defer 统一关
 		return
 	}
 
 	hpc, hr := createPseudoConsole(size, conpty_side_read, conpty_side_write, 0)
 	if hr != win.HRESULT(0) {
 		fmt.eprintln("CreatePseudoConsole Failed")
-		win.CloseHandle(conpty_side_read)
 		win.CloseHandle(main_side_write)
 		win.CloseHandle(main_side_read)
-		win.CloseHandle(conpty_side_write)
 		return
 	}
 
@@ -105,7 +113,21 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string) -> (ctx: ConptyCo
 
 	cmd_wide := win.utf8_to_wstring(cmd)
 
-	if !win.CreateProcessW(
+	// Job Object:容纳整个进程树(含孙进程),KILL_ON_JOB_CLOSE 保证
+	// 我们关闭 Job 句柄时树内所有进程被终止(避免 opencode 退出后残留 node 子进程
+	// 让 conhost 认为还有连接,读管道永不关闭 → 界面冻结)
+	ctx.job = jobCreate()
+	if ctx.job != nil {
+		jobSetKillOnClose(ctx.job)
+	}
+
+	// 终端支持真彩色:注入 COLORTERM=truecolor,否则 yazi 等应用
+	// 检测不到颜色能力,降级为无颜色输出(reverse 高亮)
+	old_colorterm : [64]u16
+	had_colorterm := win.GetEnvironmentVariableW(win.LPCWSTR("COLORTERM"), &old_colorterm[0], len(old_colorterm)) > 0
+	win.SetEnvironmentVariableW(win.LPCWSTR("COLORTERM"), win.LPCWSTR("truecolor"))
+
+	ok_create := win.CreateProcessW(
 		nil,
 		cmd_wide,
 		nil,
@@ -116,7 +138,16 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string) -> (ctx: ConptyCo
 		nil,
 		&start_info.StartupInfo,
 		&ctx.proc_info,
-	) {
+	)
+
+	// 恢复父进程环境
+	if had_colorterm {
+		win.SetEnvironmentVariableW(win.LPCWSTR("COLORTERM"), cstring16(&old_colorterm[0]))
+	} else {
+		win.SetEnvironmentVariableW(win.LPCWSTR("COLORTERM"), nil)
+	}
+
+	if !ok_create {
 		err := win.GetLastError()
 		fmt.eprintfln("CreateProcessW Failed: %v", err)
 		destroyConptyContext(&ctx)
@@ -125,6 +156,14 @@ createConptyContextValue :: proc(size: win.COORD, cmd: string) -> (ctx: ConptyCo
 		return
 	}
 	ctx.child_procid = ctx.proc_info.dwProcessId
+
+	// 创建进程成功后把它放进 Job
+	if ctx.job != nil {
+		jobAssign(ctx.job, ctx.proc_info.hProcess)
+		when ODIN_DEBUG {
+			fmt.eprintfln("AssignProcessToJobObject err=%v", win.GetLastError())
+		}
+	}
 
 	// hThread 不再需要;hProcess 保留用于等待/终止
 	win.CloseHandle(ctx.proc_info.hThread)
@@ -142,6 +181,9 @@ readConptyOutput :: proc(conpty_context: ^ConptyContext, buf: []byte) -> (n: u32
 	bytes_we_read: win.DWORD
 	if !win.ReadFile(conpty_context.read_conpty, raw_data(buf), u32(len(buf)), &bytes_we_read, nil) {
 		return 0, false
+	}
+	if bytes_we_read == 0 {
+		return 0, false // EOF:写端全部关闭(子进程树退出)
 	}
 	return bytes_we_read, true
 }
@@ -172,16 +214,52 @@ Resize :: proc(h : mem.Handle, cols, rows: u16) -> bool {
 	return hr == win.HRESULT(0)
 }
 
+// Job Object 辅助:创建 / 设置 KILL_ON_JOB_CLOSE / AssignProcessToJobObject
+@(private = "file")
+jobCreate :: proc() -> win.HANDLE {
+	return CreateJobObjectW(nil, nil)
+}
+
+@(private = "file")
+jobSetKillOnClose :: proc(job : win.HANDLE) {
+	info : JobObjectExtendedLimitInfo
+	info.basic_limit.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	SetInformationJobObject(job, JOBOBJECTINFOCLASS_EXTENDED_LIMIT, &info, size_of(JobObjectExtendedLimitInfo))
+}
+
+@(private = "file")
+jobAssign :: proc(job, process : win.HANDLE) {
+	AssignProcessToJobObject(job, process)
+}
+
+// Job 内活动进程数;0 = 会话结束(整个进程树退出)
+JobActiveProcesses :: proc(h : mem.Handle) -> int {
+	ctx := GetConptyContext(h)
+	if ctx == nil || ctx.job == nil {
+		return -1 // 无 Job(创建失败等):交给读线程断开检测兜底
+	}
+	info : JobObjectBasicAccountingInfo
+	ret : u32
+	if QueryInformationJobObject(ctx.job, JOBOBJECTINFOCLASS_BASIC_ACCOUNTING, &info, size_of(JobObjectBasicAccountingInfo), &ret) == 0 {
+		return -1
+	}
+	return int(info.active_processes)
+}
+
+// 子进程是否还活着(整个 Job 树内);false = 会话结束
 IsChildAlive :: proc(h : mem.Handle) -> bool {
-	conpty_context := GetConptyContext(h)
-	if conpty_context == nil {
+	ctx := GetConptyContext(h)
+	if ctx == nil {
 		return false
 	}
-	if conpty_context.proc_info.hProcess == win.INVALID_HANDLE_VALUE {
+	if ctx.job != nil {
+		return JobActiveProcesses(h) > 0
+	}
+	if ctx.proc_info.hProcess == win.INVALID_HANDLE_VALUE {
 		return false
 	}
 	code: win.DWORD
-	if !win.GetExitCodeProcess(conpty_context.proc_info.hProcess, &code) {
+	if !win.GetExitCodeProcess(ctx.proc_info.hProcess, &code) {
 		return false
 	}
 	return code == STILL_ACTIVE
@@ -220,5 +298,11 @@ destroyConptyContext :: proc(conpty_context: ^ConptyContext) {
 		}
 		win.CloseHandle(conpty_context.proc_info.hProcess)
 		conpty_context.proc_info.hProcess = win.INVALID_HANDLE_VALUE
+	}
+	// Job 句柄最后关:关闭触发 KILL_ON_JOB_CLOSE,树内残留进程(如 opencode 的
+	// node 子进程)被终止,conhost 检测到全部断开后读管道关闭,读线程退出
+	if conpty_context.job != nil {
+		win.CloseHandle(conpty_context.job)
+		conpty_context.job = nil
 	}
 }
