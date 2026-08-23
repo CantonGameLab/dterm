@@ -1,4 +1,4 @@
-// 场景绘制:只读遍历窗口树,把每个 Console iterm 画到屏幕。
+// 场景绘制:只读遍历窗口树,把每个 leaf 节点的 Console 画到屏幕。
 // 消费现有模型(窗口树 / Console / TermBuffer / font),零数据写回。
 package render
 
@@ -28,19 +28,22 @@ drawWalk :: proc(node_h : mem.Handle, theme : Theme) {
 		drawWalk(node.right_son_id, theme)
 		return
 	}
-	for i in 0 ..< len(node.iterms) {
-		if node.iterms[i].type == cv.ItermType.Console {
-			drawConsole(node_h, i, theme)
-		}
+	win := cv.NodeWindow(node_h)
+	if win != nil && win.console_id.id != 0 {
+		drawConsole(node_h, theme)
 	}
 }
 
-drawConsole :: proc(node_h : mem.Handle, iterm_index : int, theme : Theme) {
-	it := cv.ItermGet(node_h, iterm_index)
-	if it == nil {
+drawConsole :: proc(node_h : mem.Handle, theme : Theme) {
+	node := cv.GetWindowTreeNode(node_h)
+	if node == nil {
 		return
 	}
-	console := cv.GetConsole(it.console_id)
+	win := cv.NodeWindow(node_h)
+	if win == nil {
+		return
+	}
+	console := cv.GetConsole(win.console_id)
 	if console == nil {
 		return
 	}
@@ -48,7 +51,7 @@ drawConsole :: proc(node_h : mem.Handle, iterm_index : int, theme : Theme) {
 	if m.cell_width <= 0 || m.cell_height <= 0 {
 		return
 	}
-	t := cv.ItermAbsoluteTransform(node_h, iterm_index)
+	t := cv.NodeContentTransform(node_h)
 
 	// 打底背景
 	DrawRect(t.position_x, t.position_y, t.width, t.height, theme.bg)
@@ -122,14 +125,25 @@ drawConsole :: proc(node_h : mem.Handle, iterm_index : int, theme : Theme) {
 		}
 	}
 
-	// 块状光标:先画光标块,再用底色重绘该格字形保持可见
+	// 块状光标:先画光标块,再用底色重绘该格字形保持可见。
+	// 停在宽字符首格时画 2 格宽(覆盖续列)。
 	if console.vt.cursor_visible {
 		cr := int(console.cursor_row) - visible_top
 		if cr >= 0 && cr < int(console.rows) {
 			cx := console.origin_x + f32(console.cursor_col) * m.cell_width
 			cy := console.origin_y + f32(cr) * m.cell_height
-			DrawRect(cx, cy, m.cell_width, m.cell_height, theme.cursor)
+			cw := m.cell_width
 			line_idx := visible_top + cr
+			if line_idx < len(tb.lines) {
+				line := &tb.lines[line_idx]
+				if int(console.cursor_col) < len(line.cells) {
+					cell := line.cells[int(console.cursor_col)]
+					if cell.cp != 0 && cell.wide {
+						cw = m.cell_width * 2 // 宽字符首格:光标覆盖两格
+					}
+				}
+			}
+			DrawRect(cx, cy, cw, m.cell_height, theme.cursor)
 			if line_idx < len(tb.lines) {
 				line := &tb.lines[line_idx]
 				if int(console.cursor_col) < len(line.cells) {

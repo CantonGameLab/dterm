@@ -1,13 +1,23 @@
-// 窗口主循环:初始化 + 简单循环(事件 → 更新 → 渲染)+ 清理。
+﻿// 窗口主循环:初始化(经用户接口建三窗口布局)+ 简单循环(事件 → 更新 → 渲染)+ 清理。
+// 布局:
+//   0(root, LeftRight)
+//   ├─ 1(内部, UpDown)
+//   │   ├─ 3(console:GoMono 20 → cmd.exe)
+//   │   └─ 4(console:CascadiaMono 32 → msys2 bash)
+//   └─ 2(console:Cascadia Regular 24 → powershell)
 package main
 
-import ct "conpty"
 import cv "canvas"
 import ev "event"
 import inp "input"
-import fnt "font"
 import rd "render"
+import mem "memory"
 import "core:fmt"
+
+// 字体文件路径
+FONT_CASCADIA :: "./resource/font/CascadiaCode/CaskaydiaCoveNerdFont-Regular.ttf"
+FONT_CASCADIA_MONO :: "./resource/font/CascadiaCode/CaskaydiaCoveNerdFontMono-Regular.ttf"
+FONT_GO_MONO :: "./resource/font/Go-Mono/GoMonoNerdFont-Regular.ttf"
 
 main :: proc() {
 	if !rd.Init() {
@@ -20,42 +30,10 @@ main :: proc() {
 		return
 	}
 
-	cv.InitWindowTree()
-	w, h := rd.GetWindowSize()
-	cv.WindowTreeSetRootSize(w, h)
-
-	font_h, font_ok := fnt.LoadFont("./resource/font/CascadiaCode/CaskaydiaCoveNerdFont-Regular.ttf", 40)
-	if !font_ok {
-		fmt.eprintln("LoadFont failed")
+	if !initWindows() {
+		fmt.eprintln("init windows failed")
 		return
 	}
-	defer fnt.DestroyFont(font_h)
-	conpty_h, conpty_ok := ct.CreateConptyContext({80, 24}, "C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start")
-	if !conpty_ok {
-		fmt.eprintln("CreateConptyContext failed")
-		return
-	}
-	defer ct.DestroyConpty(conpty_h) // 兜底释放(读线程未启动时)
-
-	console_h, console_ok := cv.CreateConsole(24, 80, conpty_h)
-	if !console_ok {
-		fmt.eprintln("CreateConsole failed")
-		return
-	}
-	defer cv.DestroyConsole(console_h)
-	cv.GetConsole(console_h).font_id = font_h
-
-	if !ct.StartReadThread(conpty_h) {
-		fmt.eprintln("StartReadThread failed")
-		return
-	}
-	defer ct.StopReadThread(conpty_h)
-
-	root_h := cv.WindowTreeRoot()
-	iterm_index, _ := cv.TreeNodeAddIterm(root_h, cv.ItermType.Console, console_h)
-	it := cv.ItermGet(root_h, iterm_index)
-	it.scale_width = 1 // 填满节点
-	it.scale_height = 1
 
 	theme := rd.Theme { fg = 0xDCDCDC, bg = 0x1E1E1E, cursor = 0xFFFFFF }
 
@@ -64,25 +42,80 @@ main :: proc() {
 		if ev.Poll() {
 			break
 		}
-		// 会话结束检测:Job 内进程树归零(exit 后所有进程退出)或读管道断开。
-		// 注意:ConPTY 读管道在子进程退出后不会自动 EOF(conhost 持有写端),
-		// 读线程断开只作兜底;主信号是 Job 计数(msys2_shell.cmd -no-start
-		// 同步运行 bash,bash 退出后 cmd 包装才退出,Job 归零即会话结束)。
-		jobs := ct.JobActiveProcesses(conpty_h)
-		if jobs == 0 || !ct.IsReadThreadAlive(conpty_h) {
-			update() // 消费环形缓冲中最后的输出(exit 前的内容)
-			fmt.println("conpty session ended")
+		// 会话轮询:各窗口 console 应用退出后按 auto_close 独立处理;
+		// 全部窗口销毁后程序退出。
+		update() // 先消费所有窗口输出(含刚退出的)
+		if !cv.PollSessions() {
+			fmt.println("all sessions ended")
 			break
 		}
-		// 本帧输入(文本 + 控制字符/转义序列)发给 ConPTY
+		// 本帧输入(文本 + 控制字符/转义序列)发给焦点 window 的 console
 		if buf := inp.TakeText(); len(buf) > 0 {
-			ct.WriteConptyInput(conpty_h, buf)
+			cv.FeedConsole(buf)
 		}
-		update()
 		rd.BeginFrame()
 		rd.DrawFrame(theme)
 		rd.EndFrame()
 	}
+}
+
+// 初始化窗口布局(经用户接口):
+// 0(root, LeftRight)→ 1(UpDown)+ 2(console)
+//                   1 → 3(console)+ 4(console)
+initWindows :: proc() -> bool {
+	// 根 0
+	root := cv.CreateWindowTreeRoot()
+	if root.id == 0 {
+		return false
+	}
+
+	// 0 分裂 → 1(左)+ 2(右);焦点移到新窗 2
+	cv.SplitNewWindow(.LeftRight)
+	win2 := cv.GetFocusWindow()
+
+	// 焦点移到 1(左子),1 再分裂 → 3(上)+ 4(下)
+	if !cv.FocusMove(.Left) {
+		return false
+	}
+	win1 := cv.GetFocusWindow()
+	cv.SplitNewWindow(.UpDown)
+	win4 := cv.GetFocusWindow() // 新窗 = 下子 4
+	if !cv.FocusMove(.Up) {
+		return false
+	}
+	win3 := cv.GetFocusWindow() // 上子 3
+
+	// 三个 console 窗:2 / 3 / 4,各自不同字体、大小、cmd
+	// 2:右侧窗,Cascadia 24 → powershell
+	if !setupConsole(win2, FONT_CASCADIA, 24, "powershell.exe -NoExit") {
+		return false
+	}
+	// 3:左上窗,GoMono 20 → cmd
+	if !setupConsole(win3, FONT_GO_MONO, 20, "cmd.exe") {
+		return false
+	}
+	// 4:左下窗,CascadiaMono 32 → msys2 bash
+	if !setupConsole(win4, FONT_CASCADIA_MONO, 32,
+		"C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start") {
+		return false
+	}
+
+	// 焦点落到 3(左上),与布局顺序一致
+	cv.SetFocusWindow(win3)
+	return true
+}
+
+// 配置并启动一个 console 窗:设字体 → 启动 cmd
+setupConsole :: proc(win : mem.Handle, font_path : string, size : f32, cmd : string) -> bool {
+	if !cv.SetWindowFont(font_path, size, win) {
+		fmt.eprintln("SetWindowFont failed:", font_path)
+		return false
+	}
+	if !cv.LaunchConsole(cmd, win) {
+		fmt.eprintln("LaunchConsole failed:", cmd)
+		return false
+	}
+	return true
 }
 
 // 更新步:树遍历 + Console 布局/输出更新由 canvas 统一管理

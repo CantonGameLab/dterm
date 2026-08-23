@@ -307,8 +307,8 @@ ConsoleUpdateLayout :: proc(console_h : mem.Handle, t : Transform, cell_w, cell_
 	return true
 }
 
-// 遍历窗口树,更新每个 Console 的布局(尺寸变化时 Resize ConPTY)并拉取输出。
-// 由 main 每帧调用一次;递归属于树结构操作,归 canvas 管理。
+// 遍历窗口树,更新每个 leaf 节点绑定的 Console 的布局(尺寸变化时
+// Resize ConPTY)并拉取输出。由 main 每帧调用一次;递归属于树结构操作,归 canvas 管理。
 ConsoleUpdateTree :: proc(node_h : mem.Handle) {
 	node := GetWindowTreeNode(node_h)
 	if node == nil {
@@ -319,24 +319,28 @@ ConsoleUpdateTree :: proc(node_h : mem.Handle) {
 		ConsoleUpdateTree(node.right_son_id)
 		return
 	}
-	for i in 0 ..< len(node.iterms) {
-		if node.iterms[i].type != ItermType.Console {
-			continue
-		}
-		console_h := node.iterms[i].console_id
-		console := GetConsole(console_h)
-		if console == nil {
-			continue
-		}
-		t := ItermAbsoluteTransform(node_h, i)
-		m := fnt.GetMetrics(console.font_id)
-		old_rows, old_cols := console.rows, console.cols
-		ConsoleUpdateLayout(console_h, t, m.cell_width, m.cell_height)
-		if console.rows != old_rows || console.cols != old_cols {
-			ct.Resize(console.conpty_handle, console.cols, console.rows)
-		}
-		UpdateConsole(console_h)
+	win := NodeWindow(node_h)
+	if win == nil || win.console_id.id == 0 {
+		return
 	}
+	console_h := win.console_id
+	console := GetConsole(console_h)
+	if console == nil {
+		return
+	}
+
+	//检测Console 是否需要resize
+	t := NodeContentTransform(node_h)
+	m := fnt.GetMetrics(console.font_id)
+
+	old_rows, old_cols := console.rows, console.cols
+	ConsoleUpdateLayout(console_h, t, m.cell_width, m.cell_height)
+	if console.rows != old_rows || console.cols != old_cols {
+		ct.Resize(console.conpty_handle, console.cols, console.rows)
+	}
+
+	//通过vtparser自动更新Console
+	UpdateConsole(console_h)
 }
 
 ConsoleSetCursor :: proc(console_h : mem.Handle, row, col : u16) -> bool {

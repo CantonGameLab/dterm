@@ -133,7 +133,9 @@ unpackHandle :: proc(p : rawptr) -> mem.Handle {
 // C0
 // ---------------------------------------------------------------------------
 
-// 光标列落在宽字符续列(cp=0 + wide)时,再向 dir 方向挪一列
+// 光标列落在宽字符续列(cp=0 + wide)时,再向 dir 方向挪一列;越出网格则 clamp。
+// 注意:宽字符写不下最后一列会折行,故 cols-1 不会是续列;但 resize 缩窄后
+// cells 可能超出 cols,此处仍要保护。
 skipWideCol :: proc(console : ^Console, col : int, dir : int) -> int {
 	tb := GetTermBuffer(console.active_term_buffer_id)
 	if tb == nil {
@@ -143,11 +145,11 @@ skipWideCol :: proc(console : ^Console, col : int, dir : int) -> int {
 	if row < 0 || row >= len(tb.lines) {
 		return col
 	}
-	c := col
+	c := clamp(col, 0, int(console.cols) - 1)
 	if c >= 0 && c < len(tb.lines[row].cells) {
 		cell := tb.lines[row].cells[c]
 		if cell.cp == 0 && cell.wide {
-			c += dir
+			c = clamp(c + dir, 0, int(console.cols) - 1)
 		}
 	}
 	return c
@@ -384,31 +386,23 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 		}
 		screen_row = min(limit, screen_row + n)
 		console.cursor_row = u16(base + screen_row)
-	case 'C': // CUF(跳过宽字符续列)
+	case 'C': // CUF(右移 n 列;宽字符续列不可停,落在续列再前进)
 		vt.wrap_pending = false
 		n := max(1, p0)
-		c := int(console.cursor_col)
-		for i in 0 ..< n {
-			if c >= int(console.cols) - 1 {
-				c = int(console.cols) - 1
-				break
-			}
-			c += 1
-			c = skipWideCol(console, c, 1)
+		c := int(console.cursor_col) + n
+		if c > int(console.cols) - 1 {
+			c = int(console.cols) - 1
 		}
+		c = skipWideCol(console, c, 1)
 		console.cursor_col = u16(c)
-	case 'D': // CUB(跳过宽字符续列)
+	case 'D': // CUB(左移 n 列;宽字符续列不可停,落在续列再后退)
 		vt.wrap_pending = false
 		n := max(1, p0)
-		c := int(console.cursor_col)
-		for i in 0 ..< n {
-			if c <= 0 {
-				c = 0
-				break
-			}
-			c -= 1
-			c = skipWideCol(console, c, -1)
+		c := int(console.cursor_col) - n
+		if c < 0 {
+			c = 0
 		}
+		c = skipWideCol(console, c, -1)
 		console.cursor_col = u16(c)
 	case 'H', 'f': // CUP(1-based;origin 下相对滚动区顶)
 		when VT_DEBUG { vtDbg(console_h, fmt.tprintf("CUP p0=%d p1=%d base=%d", p0, p1, base)) }

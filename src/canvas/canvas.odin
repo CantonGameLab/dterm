@@ -1,14 +1,11 @@
+// 窗口树:leaf 节点 = 一个 window = 一个终端应用(console),
+// 内部节点 = 纯分割容器。工具 iterm 为管理工具浮层(锚定于节点几何)。
 package canvas
 
 import mem "../memory"
 
 MAX_TREE_NODE_SLOTS :: 2000
 ROOT_WINDOW_TREE_NODE_ID :: 1 // 硬编码根节点:transform = 窗口分辨率,position = {0,0}
-
-ItermType :: enum u16 {
-	Console,
-	FrameBuffer,
-}
 
 // 绝对几何:像素坐标,由布局层按 split tree 递归算出
 Transform :: struct {
@@ -18,33 +15,52 @@ Transform :: struct {
 	width : f32,
 }
 
-// 相对节点几何的归一化缩放:绝对矩形 = 节点 Transform × scale
-ScaleTransform :: struct {
-	scale_x : f32,
-	scale_y : f32,
-	scale_height : f32,
-	scale_width : f32,
-}
-
-Iterm :: struct {
-	layer : u16,
-	type : ItermType,
-
-	console_id : mem.Handle, // 本 pane 的屏幕句柄;0 = 空
-
-	using scale_transform : ScaleTransform,
-}
-
 SplitType :: enum u8 {
 	UpDown,
 	LeftRight,
 }
 
-// 节点即窗口:几何、分割、内容(iter ms)一体
-WindowTreeNode :: struct {
-	iterms : [dynamic]Iterm,
+// 管理工具类型(dterm 内置 UI,不走 conpty;后续按需补充)
+ToolType :: enum u8 {
+	Console,   // 工具控制台(dterm 内部命令/输出)
+	FileTree,  // 侧边文件树
+	Preview,   // 预览面板
+	StatusBar, // 状态栏
+	Terminal,  // 备用终端面板
+}
 
-	main_console_id : u32,
+// 工具 iterm 锚定:大小是绝对像素,位置由双锚点决定。
+// 对齐规则:iterm 系数坐标转化的绝对坐标,永远等于 window 系数坐标转化的绝对坐标:
+//   window_pos + window_size*window_coord == iterm_pos + iterm_size*iterm_coord
+// 即 iterm_pos = window_pos + window_size*window_coord - iterm_size*iterm_coord。
+// 例:双锚点 (0,0) = 左上角贴 window 左上角;(0.5,0.5) = 中心对齐。
+Iterm :: struct {
+	tool_type : ToolType,
+	console_id : mem.Handle, // 工具渲染目标(内部 console,conpty_handle = 0);0 = 空
+	layer : u16, // 绘制顺序层(小 = 先画,被上层覆盖)
+
+	width, height : f32, // 绝对大小(px)
+
+	iterm_ax, iterm_ay : f32, // iterm 自身系数坐标(锚点,0..1)
+	window_ax, window_ay : f32, // window 系数坐标(锚点,0..1)
+}
+
+// 窗口:leaf 节点承载的内容(console 应用 + 字体 + 工具浮层)。
+// 与树节点分离:交换/移动窗口只交换 TreeNode.window_id。
+Window :: struct {
+	console_id : mem.Handle, // 绑定的 Console;0 = 空
+	font_id : mem.Handle, // 窗口字体(LaunchConsole 时挂到 console);0 = 未设
+	auto_close : bool, // console 应用退出后自动销毁本窗口
+	iterms : [dynamic]Iterm, // 管理工具浮层(锚定于所属节点几何)
+}
+
+MAX_WINDOW_SLOTS :: 256
+
+windows : mem.GenArray(MAX_WINDOW_SLOTS, Window)
+
+// 树节点:纯结构(几何/分割/父子/挂载窗口)。leaf 挂 window_id,内部节点 = 0
+WindowTreeNode :: struct {
+	window_id : mem.Handle, // 挂载的窗口;0 = 空(仅 leaf 有意义)
 
 	using transform : Transform,
 
@@ -69,13 +85,34 @@ window_tree_nodes : mem.GenArray(MAX_TREE_NODE_SLOTS, WindowTreeNode)
 Window_Width : u32 = 1920
 Window_Height : u32 = 1080
 
+// 当前聚焦的 window(leaf);0 = 无。全局唯一。
+focused_node : mem.Handle
+
 InitWindowTree :: proc() {
 	mem.AllocAt(&window_tree_nodes, ROOT_WINDOW_TREE_NODE_ID, WindowTreeNode {
 		is_leaf = true,
 		width = f32(Window_Width),
 		height = f32(Window_Height),
 	})
-	window_tree_nodes.data[ROOT_WINDOW_TREE_NODE_ID].iterms = make([dynamic]Iterm)
+}
+
+// 新建窗口(内容实体,尚未挂载到节点)
+CreateWindow :: proc() -> (h : mem.Handle) {
+	return mem.Alloc(&windows, Window {})
+}
+
+GetWindow :: proc(h : mem.Handle) -> ^Window {
+	return mem.Get(&windows, h)
+}
+
+// 释放窗口槽(含工具 iterms);调用方负责先销毁 console/font
+DestroyWindowSlot :: proc(h : mem.Handle) {
+	win := GetWindow(h)
+	if win == nil {
+		return
+	}
+	delete(win.iterms)
+	mem.Free(&windows, h)
 }
 
 CreateWindowTreeNode :: proc() -> (h : mem.Handle) {
@@ -84,6 +121,17 @@ CreateWindowTreeNode :: proc() -> (h : mem.Handle) {
 
 GetWindowTreeNode :: proc(h : mem.Handle) -> ^WindowTreeNode {
 	return mem.Get(&window_tree_nodes, h)
+}
+
+// 按 id 构造当前世代的有效句柄(指令字符串的 @id 用);槽不存在返回 0
+NodeHandleById :: proc(id : u32) -> mem.Handle {
+	if id == 0 || int(id) >= window_tree_nodes.next {
+		return {}
+	}
+	if !mem.Alive(&window_tree_nodes, int(id)) {
+		return {}
+	}
+	return mem.Handle { id = id, generation = window_tree_nodes.generations[id] }
 }
 
 // 树的根 = parent_id 为 0 的节点(分裂 root 后根迁移到新父)
@@ -96,36 +144,173 @@ WindowTreeRoot :: proc() -> mem.Handle {
 	return {}
 }
 
-// ---------------------------------------------------------------------------
-// Iterm 数据操作(iterm 无独立 id,按节点内下标定位)
-// ---------------------------------------------------------------------------
+// 清空整个窗口树(释放所有节点);之后可重新 CreateWindowTreeRoot
+ResetWindowTree :: proc() {
+	root := WindowTreeRoot()
+	if root.id != 0 {
+		TreeNodeRemoveAll(root)
+	}
+}
 
-TreeNodeAddIterm :: proc(h : mem.Handle, type : ItermType, console_h : mem.Handle) -> (index : int, ok : bool) {
+// 递归释放子树(含根),不保留结构
+TreeNodeRemoveAll :: proc(h : mem.Handle) {
 	node := GetWindowTreeNode(h)
 	if node == nil {
+		return
+	}
+	if !node.is_leaf {
+		TreeNodeRemoveAll(node.left_son_id)
+		TreeNodeRemoveAll(node.right_son_id)
+	}
+	mem.Free(&window_tree_nodes, h)
+}
+
+// ---------------------------------------------------------------------------
+// 焦点
+// ---------------------------------------------------------------------------
+
+SetFocus :: proc(node_h : mem.Handle) {
+	focused_node = node_h
+}
+
+GetFocus :: proc() -> mem.Handle {
+	return focused_node
+}
+
+FocusDirection :: enum u8 {
+	Left,
+	Right,
+	Up,
+	Down,
+}
+
+// 方向导航:找焦点 leaf 在 dir 方向上的相邻 leaf。
+// 上行找同轴边界祖先,下行找最远侧 leaf;无邻居返回 0。
+FocusNeighbor :: proc(from : mem.Handle, dir : FocusDirection) -> mem.Handle {
+	cur := from
+	for {
+		node := GetWindowTreeNode(cur)
+		if node == nil || node.parent_id.id == 0 {
+			return {}
+		}
+		parent := GetWindowTreeNode(node.parent_id)
+		if parent == nil {
+			return {}
+		}
+		is_horiz := dir == .Left || dir == .Right
+		same_axis := (is_horiz && parent.split_type == .LeftRight) || (!is_horiz && parent.split_type == .UpDown)
+		if same_axis {
+			// 焦点在当前侧时,另一侧即候选;否则继续上行
+			if dir == .Left && cur == parent.right_son_id {
+				return focusDescend(parent.left_son_id, dir)
+			}
+			if dir == .Right && cur == parent.left_son_id {
+				return focusDescend(parent.right_son_id, dir)
+			}
+			if dir == .Up && cur == parent.right_son_id {
+				return focusDescend(parent.left_son_id, dir)
+			}
+			if dir == .Down && cur == parent.left_son_id {
+				return focusDescend(parent.right_son_id, dir)
+			}
+		}
+		cur = node.parent_id
+	}
+}
+
+// 从候选根下行到最远侧 leaf;跨轴时固定取左/上子
+focusDescend :: proc(h : mem.Handle, dir : FocusDirection) -> mem.Handle {
+	node := GetWindowTreeNode(h)
+	if node == nil {
+		return {}
+	}
+	if node.is_leaf {
+		return h
+	}
+	is_horiz := dir == .Left || dir == .Right
+	if is_horiz && node.split_type == .LeftRight {
+		if dir == .Left {
+			return focusDescend(node.right_son_id, dir) // 找最右
+		}
+		return focusDescend(node.left_son_id, dir) // 找最左
+	}
+	if !is_horiz && node.split_type == .UpDown {
+		if dir == .Up {
+			return focusDescend(node.right_son_id, dir) // 找最下
+		}
+		return focusDescend(node.left_son_id, dir) // 找最上
+	}
+	// 跨轴:固定取左/上子(简单方案)
+	return focusDescend(node.left_son_id, dir)
+}
+
+// ---------------------------------------------------------------------------
+// 节点内容操作(leaf 节点挂载一个窗口)
+// ---------------------------------------------------------------------------
+
+// 挂载/摘除窗口(0 = 摘除);仅 leaf 有效。交换窗口 = 交换两节点的 window_id
+TreeNodeSetWindow :: proc(h : mem.Handle, win_h : mem.Handle) -> bool {
+	node := GetWindowTreeNode(h)
+	if node == nil || !node.is_leaf {
+		return false
+	}
+	node.window_id = win_h
+	return true
+}
+
+// 取节点挂载的窗口;内部节点或空返回 nil
+NodeWindow :: proc(h : mem.Handle) -> ^Window {
+	node := GetWindowTreeNode(h)
+	if node == nil || node.window_id.id == 0 {
+		return nil
+	}
+	return GetWindow(node.window_id)
+}
+
+// leaf 节点几何即内容矩形(窗口占满节点)
+NodeContentTransform :: proc(node_h : mem.Handle) -> Transform {
+	node := GetWindowTreeNode(node_h)
+	if node == nil {
+		return {}
+	}
+	return Transform {
+		position_x = node.position_x,
+		position_y = node.position_y,
+		width = node.width,
+		height = node.height,
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Iterm 数据操作(iterm 无独立 id,按窗口内下标定位;窗口自动创建)
+// ---------------------------------------------------------------------------
+
+TreeNodeAddIterm :: proc(h : mem.Handle, tool_type : ToolType) -> (index : int, ok : bool) {
+	win := nodeWindowEnsure(h)
+	if win == nil {
 		return 0, false
 	}
-	append(&node.iterms, Iterm { type = type, console_id = console_h })
-	return len(node.iterms) - 1, true
+	append(&win.iterms, Iterm { tool_type = tool_type })
+	return len(win.iterms) - 1, true
 }
 
 TreeNodeRemoveIterm :: proc(h : mem.Handle, index : int) {
-	node := GetWindowTreeNode(h)
-	if node == nil || index < 0 || index >= len(node.iterms) {
+	win := nodeWindowEnsure(h)
+	if win == nil || index < 0 || index >= len(win.iterms) {
 		return
 	}
-	ordered_remove(&node.iterms, index)
+	ordered_remove(&win.iterms, index)
 }
 
 ItermGet :: proc(node_h : mem.Handle, index : int) -> ^Iterm {
-	node := GetWindowTreeNode(node_h)
-	if node == nil || index < 0 || index >= len(node.iterms) {
+	win := nodeWindowEnsure(node_h)
+	if win == nil || index < 0 || index >= len(win.iterms) {
 		return nil
 	}
-	return &node.iterms[index]
+	return &win.iterms[index]
 }
 
-// iterm 绝对矩形 = 节点几何 × scale(归一化)
+// iterm 绝对矩形 = 锚定变换(见 Iterm 注释)
 ItermAbsoluteTransform :: proc(node_h : mem.Handle, index : int) -> Transform {
 	node := GetWindowTreeNode(node_h)
 	it := ItermGet(node_h, index)
@@ -133,11 +318,28 @@ ItermAbsoluteTransform :: proc(node_h : mem.Handle, index : int) -> Transform {
 		return {}
 	}
 	return Transform {
-		position_x = node.position_x + node.width * it.scale_x,
-		position_y = node.position_y + node.height * it.scale_y,
-		width = node.width * it.scale_width,
-		height = node.height * it.scale_height,
+		position_x = node.position_x + node.width * it.window_ax - it.width * it.iterm_ax,
+		position_y = node.position_y + node.height * it.window_ay - it.height * it.iterm_ay,
+		width = it.width,
+		height = it.height,
 	}
+}
+
+// 取节点窗口,无则自动创建(仅 leaf;内部节点返回 nil)
+nodeWindowEnsure :: proc(node_h : mem.Handle) -> ^Window {
+	if win := NodeWindow(node_h); win != nil {
+		return win
+	}
+	node := GetWindowTreeNode(node_h)
+	if node == nil || !node.is_leaf {
+		return nil
+	}
+	win_h := CreateWindow()
+	if win_h.id == 0 {
+		return nil
+	}
+	node.window_id = win_h
+	return GetWindow(win_h)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,7 +388,7 @@ TreeNodeSplit :: proc(h : mem.Handle, split_type : SplitType, factor : f32) -> (
 	return parent_h, right_h, true
 }
 
-// 摘除子树并释放节点槽(含 iterms);根不可删;父变单子时提升兄弟顶替,保持满二叉树
+// 摘除子树并释放节点槽(含 iterms/font);根不可删;父变单子时提升兄弟顶替,保持满二叉树
 TreeNodeRemove :: proc(h : mem.Handle) {
 	if h.id == 0 || h == WindowTreeRoot() {
 		return
@@ -209,7 +411,6 @@ TreeNodeRemove :: proc(h : mem.Handle) {
 		TreeNodeRemove(node.left_son_id)
 		TreeNodeRemove(node.right_son_id)
 	}
-	delete(node.iterms)
 	mem.Free(&window_tree_nodes, h)
 	if parent == nil {
 		return
@@ -247,7 +448,6 @@ treeNodePromote :: proc(parent_h, son_h : mem.Handle) {
 			gp.right_son_id = son_h
 		}
 	}
-	delete(p.iterms)
 	mem.Free(&window_tree_nodes, parent_h)
 	if gpid.id != 0 {
 		RecalculateTransforms(gpid)

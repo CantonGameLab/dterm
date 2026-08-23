@@ -125,8 +125,11 @@ LoadFont :: proc(path : string, size : f32, antialias : u8 = 1) -> (h : mem.Hand
 
 	// 主字体无 CJK 字形 → 附系统中文字体
 	if stbtt.FindGlyphIndex(&font.faces[0].info, '你') == 0 {
+		// fallback 按主字体 em 像素尺寸对齐,保证同字号下汉字与拉丁字形等大。
+		// 主字体 em 像素 = scale × unitsPerEm;unitsPerEm = 1 / ScaleForMappingEmToPixels(info, 1.0)
+		main_em_px := font.faces[0].scale / stbtt.ScaleForMappingEmToPixels(&font.faces[0].info, 1.0)
 		for fb_path in FALLBACK_FONTS {
-			if fb, ffok := faceLoad(fb_path, size); ffok {
+			if fb, ffok := faceLoadFallback(fb_path, main_em_px); ffok {
 				font.faces[1] = fb
 				font.face_count = 2
 				break
@@ -287,6 +290,26 @@ faceLoad :: proc(path : string, size : f32) -> (Face, bool) {
 		return {}, false
 	}
 	face.scale = stbtt.ScaleForPixelHeight(&face.info, size)
+	return face, true
+}
+
+// fallback 字体加载:按 em 尺寸对齐主字体(scale 传递)。
+// 不能用 ScaleForPixelHeight(size):不同字体的 ascent-descent 不同,
+// 同参数下雅黑(2703)比 Cascadia(2380)缩得更小 → 汉字偏小。
+// 正确做法:fallback 的 em 像素尺寸 = 主字体 em 像素尺寸,两字体字形等大。
+faceLoadFallback :: proc(path : string, main_em_px : f32) -> (Face, bool) {
+	data, err := os.read_entire_file_from_path(path, context.allocator)
+	if err != nil {
+		return {}, false
+	}
+	face := Face { data = data }
+	offset := stbtt.GetFontOffsetForIndex(cast([^]byte)raw_data(data), 0)
+	if offset < 0 || !stbtt.InitFont(&face.info, cast([^]byte)raw_data(data), offset) {
+		delete(data)
+		return {}, false
+	}
+	// ScaleForMappingEmToPixels(info, em_px) = 使 em 盒映射到 em_px 像素的 scale
+	face.scale = stbtt.ScaleForMappingEmToPixels(&face.info, main_em_px)
 	return face, true
 }
 
