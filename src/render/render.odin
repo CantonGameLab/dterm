@@ -125,10 +125,12 @@ Init :: proc() -> bool {
 	u_screen_size = gl.GetUniformLocation(program, "uScreenSize")
 	initBatch()
 	initWhiteTexture()
+	UiInit() // UI 层(nanovg);失败则 UI 禁用,不影响主渲染
 	return true
 }
 
 Quit :: proc() {
+	UiQuit()
 	gl.DeleteProgram(program)
 	gl.DeleteBuffers(1, &vbo)
 	gl.DeleteVertexArrays(1, &vao)
@@ -166,7 +168,13 @@ BeginFrame :: proc() {
 	quad_count = 0
 	current_tex = 0
 
+	// 主渲染状态(上一帧 nanovg flush 可能改动 blend/状态,这里重置)
 	gl.UseProgram(program)
+	gl.BindVertexArray(vao)
+	gl.Enable(gl.BLEND)
+	gl.BlendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA)
+	gl.Disable(gl.SCISSOR_TEST)
+	gl.Disable(gl.DEPTH_TEST)
 	gl.Uniform2f(u_screen_size, screen_w, screen_h)
 }
 
@@ -253,10 +261,18 @@ flushBatch :: proc() {
 	if quad_count == 0 {
 		return
 	}
+	// 显式绑回主渲染的 program + VAO;nano vulg 等第三方后端可能改动了 bound 状态
+	gl.UseProgram(program)
+	gl.BindVertexArray(vao)
 	gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
 	gl.BufferData(gl.ARRAY_BUFFER, int(quad_count * 6 * size_of(Vertex)), raw_data(quad_verts[:quad_count * 6]), gl.DYNAMIC_DRAW)
 	gl.DrawArrays(gl.TRIANGLES, 0, i32(quad_count * 6))
 	quad_count = 0
+}
+
+// 公开:供场景层在 UI 绘制前把攒的终端 quad 先上屏
+FlushBatch :: proc() {
+	flushBatch()
 }
 
 // ---------------------------------------------------------------------------

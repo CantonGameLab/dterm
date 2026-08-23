@@ -66,6 +66,11 @@ TakeText :: proc() -> []u8 {
 	return buffer.data[:buffer.len]
 }
 
+// 清空本帧输入缓冲(如快捷键触发时丢弃其转义序列)
+ClearText :: proc() {
+	buffer.len = 0
+}
+
 bufferAppend :: proc(data : []byte) {
 	space := len(buffer.data) - buffer.len
 	n := min(space, len(data))

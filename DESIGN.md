@@ -27,15 +27,15 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 ## 3. 分层架构
 
 ```
-┌─ 使用方层:ConPTY 子进程(夹带 ANSI 指令)/ 外部工具 / DLL 插件
-├─ 用户接口层:命令字符串(OSC 999 载体)+ DLL ApiTable(意图级,低上下文)
-├─ 适配器层:command parser(命令 → Command → 模块调用;id 世代解析 / 意图翻译)
-├─ 模块接口层:canvas / conpty / font / render 公开函数(操作级,已知上下文)
+┌─ 使用方层:悬浮控制台指令(F2 呼出,已实现)/ ConPTY 子进程 ANSI 指令(规划)/ DLL 插件(规划)
+├─ 用户接口层:指令语义(5.0)+ 用户函数族(5.0b)
+├─ 适配器层:command parser(指令字符串 → 用户函数;id 世代解析)
+├─ 模块接口层:canvas / conpty / font / render 公开函数(操作级,见 5.1)
 ├─ 数据层:窗口树 / Console / TermBuffer / 会话 / 字体
-└─ 渲染层:DrawFrame(按 cell 内容分发)
+└─ 渲染层:DrawFrame(终端内容)+ nanovg UI 层(悬浮控制台)
 ```
 
-- 指令通道与 DLL 插件**并存**:DLL 给编译代码的用户,ANSI 指令给运行中的子进程;两者都落在用户接口(5.0)上,经适配器翻译到模块接口。
+- 指令入口与 DLL 插件**并存**:DLL 给编译代码的用户,指令给交互/子进程;两者都落在用户接口(5.0)上,经适配器翻译到模块接口。
 - **模块间通过数据交互,避免回调交叉**;回调只允许出现在"框架 → 使用方"边界(插件契约)。
 
 ## 4. 程序状态(数据结构设计)
@@ -113,55 +113,76 @@ focused_iterm : i32        // -1 = 焦点在主应用;>=0 = iterms 下标
 
 | | 模块接口(内部) | 用户接口(外部) |
 |---|---|---|
-| 调用方 | 其他模块(canvas ↔ conpty ↔ font) | 子进程 / DLL 插件 / 脚本 / 未来 UI |
+| 调用方 | 其他模块(canvas ↔ conpty ↔ font) | 子进程 / 控制台指令 / DLL 插件 / 脚本 |
 | 上下文 | 已知:Handle 世代、布局、模块边界、调用顺序 | 极少:只知道窗口 id 与意图 |
 | 参数 | `mem.Handle`、内部结构指针 | 简单整数 id、cstring、自包含参数 |
-| 隐含依赖 | 可依赖全局状态(焦点、当前字体) | 不能依赖,参数必须完整 |
 | 操作粒度 | 单一操作(分裂 / 挂载 / 改比例) | 意图(open-file = 聚焦 + 输入序列的组合) |
 | 返回 | `(值, bool)` | 统一状态码 / 回执 |
 
-- 模块接口在"已知上下文"下设计:传 Handle、直写字段、组合由调用方负责。
-- 用户接口在"低上下文"下设计:只认窗口 id(世代解析在内部)、命令自包含、操作是意图而非步骤、返回统一状态码。
-- **用户接口必须翻译/适配到模块接口**(用户接口适配器层),而不是直接暴露模块接口。
+- 模块接口在"已知上下文"下设计:传 Handle、直写字段。
+- 用户接口在"低上下文"下设计:只认窗口 id(世代解析在内部)、命令自包含、操作是意图。
+- **用户接口适配器**:命令字符串 → 调用模块接口(parser 层),不直接暴露模块接口。
 
-### 5.0 用户接口(外部,意图级)
+### 5.0 用户接口(控制台指令集)
 
-命令字符串(ANSI 载体 `ESC]999;<cmd> ESC\` 与 DLL ApiTable 共享同一语义):
+**入口**:悬浮控制台(F2 呼出)输入指令,回车执行。控制台是专用命令框,**无需 `:` 前缀**(执行时自动补全,但文档保留 `:` 前缀以示命令形态)。
 
+**语法**:`命令名 参数... [@id]`
+- 参数空格分隔,`"..."` 包裹字符串
+- `@id` 放末尾指定目标窗口(缺省 = 当前焦点);`@id` 缺省或为 0 时作用于焦点窗口
+- 方向:水平 `right|leftright|h`,垂直 `down|updown|v`
+
+| 指令 | 参数 | 说明 |
+|---|---|---|
+| `split` | `<right\|down> [factor] [@id]` | 分裂窗口为新窗(焦点窗保留为左/上,新开右/下),新窗成为焦点 |
+| `focus` | `<id\|left\|right\|up\|down>` | 聚焦指定窗口(按 id 或方向导航) |
+| `destroy` | `[@id]` | 关闭窗口及其 console 应用,从树摘除 |
+| `factor` | `<ratio> [@id]` | 设置窗口**父节点** split_factor(0.05..0.95) |
+| `exchange` | `<left\|right\|up\|down> [@id]` | 与方向邻居**交换窗口内容**(只换 window_id,树结构不变) |
+| `font` | `"<path>" <size> [@id]` | 设置窗口字体文件与字号 |
+| `launch` | `"<cmd>" [@id]` | 用窗口已配置的字体启动 console 应用(需先 `font`) |
+| `feed` | `"<text>" [@id]` | 向窗口 console 写入输入序列 |
+| `autoclose` | `<true\|false> [@id]` | 设置应用退出后是否自动关闭窗口(默认 true) |
+| `count` / `windows` | - | 查询窗口数量(经 UI 输出) |
+| `focus-get` / `getfocus` | - | 查询当前焦点窗口 id(经 UI 输出) |
+
+**示例**:
 ```
-focus <id|left|right|up|down>           聚焦指定窗口(0 = 焦点自身/无参 = 当前)
-open-file <window-id> <path>            让指定窗口的应用打开文件(自包含:内部翻译成应用命令)
-send-input <window-id> "<bytes>"        向指定窗口的 conpty 写入原始输入序列
-split <window-id> <right|down> <factor> 分裂指定窗口(参数完整,不依赖当前焦点)
-remove <window-id>                      移除指定窗口
-font-size <window-id> <n>               改指定窗口字体
-list-windows                            (查询)返回窗口 id / 应用名 / 尺寸清单
+split right            # 焦点窗向右分裂
+split down 0.4         # 向下分裂,上(原窗)占 40%
+focus 3                # 聚焦 id=3 的窗口
+focus left             # 焦点向左导航
+factor 0.6             # 焦点窗父节点比例 0.6
+exchange right         # 与右侧邻居交换内容
+font "./f.ttf" 18      # 焦点窗字体 Cascadia 18
+launch "cmd.exe"       # 启动 cmd(需先设字体)
+destroy @3             # 关闭窗口 3
+autoclose false        # 应用退出后保留窗口
+count                  # 窗口数量
 ```
 
-- 窗口 id 是用户视角的稳定整数(世代解析由适配器完成)。
-- `open-file` 是意图级命令:适配器内部 = 查目标窗口 conpty → 翻译应用命令(neovim → `:e path\r`)→ 写输入,用户不知道这些步骤。
-- 返回统一状态码,经 `OSC 998` 回执(子进程)或函数返回值(DLL)。
+**parser 实现:** `src/canvas/parser.odin`(`ParseCommandString` / `ExecuteCommandString`),直接调用 `src/canvas/window.odin` 的用户函数。
 
-DLL ApiTable 的用户视角函数族(与命令字符串一一对应):
+### 5.0b 用户接口(函数族,window.odin)
 
-```odin
-// 用户接口(外部):低上下文,只认 window id
-window_focus(id : u32, dir : i32) -> i32          // 0 = ok;dir: 0=id 1=left 2=right 3=up 4=down
-window_split(id : u32, dir : i32, factor : f32) -> i32
-window_remove(id : u32) -> i32
-app_open_file(id : u32, path : cstring) -> i32    // 意图级
-app_send_input(id : u32, data : cstring) -> i32
-app_font_size(id : u32, size : f32) -> i32
-window_list(out : ^WindowInfo, cap : i32) -> i32  // 查询
-```
+控制台指令最终映射到这些函数(用户代码/未来 DLL 也可直接调用):
 
-**用户接口适配器(实现层)**:命令字符串 / DLL 函数 → 统一解析为内部 Command 结构 → 调用模块接口。适配器负责:窗口 id → Handle 的世代解析、意图 → 步骤的翻译(open-file → 查 conpty → 写序列)、状态码统一。
-
-```odin
-// 适配器内部(非用户可见)
-CommandKind :: enum u8 { Focus, OpenFile, SendInput, Split, Remove, FontSize, ... }
-Command :: struct { kind, window_id : u32, data : CommandData }
-```
+| 函数 | 签名 | 说明 |
+|---|---|---|
+| `CreateWindowTreeRoot` | `() -> mem.Handle` | 建根节点 + 根窗口,幂等 |
+| `SplitNewWindow` | `(dir : SplitType, id = {}) -> mem.Handle` | 分裂新窗,焦点移到新窗 |
+| `DestroyWindow` | `(id = {}) -> bool` | 关应用+会话+树摘除;唯一剩余窗口清空整树 |
+| `SetSplitFactor` | `(factor : f32, id = {}) -> bool` | 设父节点比例 |
+| `ExchangeWindow` | `(dir : FocusDirection, id = {}) -> bool` | 与方向邻居交换 window_id |
+| `SetWindowFont` | `(path : string, size : f32, id = {}) -> bool` | 设窗口字体(无窗则自动创建) |
+| `LaunchConsole` | `(cmd : string, id = {}) -> bool` | 用窗口字体启动会话;默认 auto_close=true |
+| `FeedConsole` | `(data : []byte, id = {}) -> bool` | 写输入到窗口 console |
+| `SetAutoClose` | `(b : bool, id = {}) -> bool` | 设置自动关闭 |
+| `PollSessions` | `() -> bool` | 每帧检测会话结束,按 auto_close 处理;返回是否有存活会话 |
+| `SetFocusWindow` | `(id : mem.Handle) -> bool` | 设焦点 |
+| `FocusMove` | `(dir : FocusDirection, id = {}) -> bool` | 方向导航设焦点 |
+| `GetFocusWindow` | `() -> mem.Handle` | 查询焦点 |
+| `WindowCount` | `() -> int` | 查询窗口数 |
 
 ### 5.1 模块接口(内部,操作级)
 
@@ -243,13 +264,19 @@ DrawFrame(theme)
 
 ## 6. 对外扩展接口
 
-### 6.1 DLL 插件(编译代码的用户)
+### 6.1 指令入口现状(V1 已实现)
 
-- `ApiTable`:用户视角函数族(见 5.0)+ `AppState`(全局状态指针,GenArray 定长存储、地址稳定)。
+- **悬浮控制台指令**(已实现):F2 呼出悬浮输入框,输入指令回车执行(见 5.0)。这是当前唯一的指令入口,供用户交互。
+- **ANSI 子进程指令通道**(规划,未实现):子进程经扩展 ANSI 序列(`ESC]999;<cmd> ESC\`)向 dterm 发指令。需在 vtparse 加 OSC 999 识别 → 提取命令字符串 → `ExecuteCommandString`。
+- 两者共用同一套指令语义(5.0),只是载体不同。
+
+### 6.2 DLL 插件(规划,未实现)
+
+- `ApiTable`:用户视角函数族(见 5.0b)+ `AppState`(全局状态指针,GenArray 定长存储、地址稳定)。
 - 用户 DLL `dterm_bind(^ApiTable)` 接收接口;改行为只需重编译 DLL + 热重载,不重启 dterm。
 - 跨边界约束:不传动态数组/字符串所有权;用户 DLL 不分配内存;全部 `proc "stdcall"`。
 
-### 6.2 配置分层
+### 6.3 配置分层
 
 - **数据配置**(conf 文件,不编译):主题、字体、启动命令、快捷键映射。启动时读入,作为默认值。
 - **行为配置**(Odin 代码 / DLL,编译):自定义初始化流程、特殊布局逻辑。
@@ -264,7 +291,9 @@ DrawFrame(theme)
 
 ## 8. 待办与开放问题
 
+- [ ] ANSI 子进程指令通道:vtparse 识别 `OSC 999 ; <cmd> ST`,转 `ExecuteCommandString`
 - [ ] iterm 工具运行时(InternalApp 绘制 + 输入拦截)落地后定义工具输入接口
 - [ ] rich content:扩展 ANSI 序列设计(OSC 998 回执 / 内容上传协议)
+- [ ] 多插件注册与优先级
 - [ ] 指令回复通道(子进程需要知道指令成败?)
 - [ ] 多插件注册与优先级

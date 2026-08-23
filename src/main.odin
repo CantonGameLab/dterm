@@ -1,4 +1,4 @@
-﻿// 窗口主循环:初始化(经用户接口建三窗口布局)+ 简单循环(事件 → 更新 → 渲染)+ 清理。
+// 窗口主循环:初始化(经用户接口建三窗口布局)+ 简单循环(事件 → 更新 → 渲染)+ 清理。
 // 布局:
 //   0(root, LeftRight)
 //   ├─ 1(内部, UpDown)
@@ -11,8 +11,10 @@ import cv "canvas"
 import ev "event"
 import inp "input"
 import rd "render"
+import s3 "vendor:sdl3"
 import mem "memory"
 import "core:fmt"
+import "core:strings"
 
 // 字体文件路径
 FONT_CASCADIA :: "./resource/font/CascadiaCode/CaskaydiaCoveNerdFont-Regular.ttf"
@@ -49,14 +51,68 @@ main :: proc() {
 			fmt.println("all sessions ended")
 			break
 		}
-		// 本帧输入(文本 + 控制字符/转义序列)发给焦点 window 的 console
+		// F2:切换悬浮控制台。触发时清空本帧输入缓冲(丢弃 F2 自身的转义序列),
+		// 并跳过本帧输入,避免把功能键当文本喂进控制台。
+		if inp.Keys.pressed[int(s3.Scancode.F2)] {
+			cv.ToggleCommandBar()
+			inp.ClearText()
+			rd.BeginFrame()
+			rd.DrawFrame(theme)
+			rd.EndFrame()
+			continue
+		}
+		// 本帧输入:控制台可见时进控制台,否则发给焦点 console
 		if buf := inp.TakeText(); len(buf) > 0 {
-			cv.FeedConsole(buf)
+			if cv.CommandBarVisible() {
+				handleCmdBarInput(buf)
+			} else {
+				cv.FeedConsole(buf)
+			}
 		}
 		rd.BeginFrame()
 		rd.DrawFrame(theme)
 		rd.EndFrame()
 	}
+}
+
+// 控制台输入:逐字节过滤。
+//   回车:执行命令(控制台是专用命令框,无需 ':' 前缀,执行时自动补)
+//   ESC :关闭控制台
+//   退格:删末尾
+//   可打印字符:进缓冲
+//   其他控制符/转义序列:丢弃(避免 F2/方向键等转义当文本)
+handleCmdBarInput :: proc(buf : []u8) {
+	for b in buf {
+		switch {
+		case b == '\r' || b == '\n':
+			execCmdBar()
+			return
+		case b == 0x1B: // ESC 关闭控制台
+			cv.ToggleCommandBar()
+			cv.CommandBarTake() // 丢弃未完成输入
+			return
+		case b == 0x7F || b == '\b': // 退格
+			cv.CommandBarFeed(buf[:1])
+		case b < 0x20: // 其他控制字符丢弃
+			continue
+		case:
+			cv.CommandBarFeed(buf[:1])
+		}
+	}
+}
+
+// 取走控制台输入并执行(自动补 ':' 前缀)
+execCmdBar :: proc() {
+	cmd := cv.CommandBarTake()
+	if len(cmd) > 0 {
+		prefix := cmd
+		if prefix[0] != ':' {
+			prefix = strings.concatenate({":", cmd})
+			defer delete(prefix)
+		}
+		cv.ExecuteCommandString(prefix)
+	}
+	cv.ToggleCommandBar() // 执行后关闭
 }
 
 // 初始化窗口布局(经用户接口):

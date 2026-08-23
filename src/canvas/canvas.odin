@@ -85,12 +85,73 @@ window_tree_nodes : mem.GenArray(MAX_TREE_NODE_SLOTS, WindowTreeNode)
 Window_Width : u32 = 1920
 Window_Height : u32 = 1080
 
+// 分割条默认样式:明黄色,3 像素宽
+DEFAULT_FRAME_COLOR :: 0xFFFF00
+DEFAULT_FRAME_WIDTH :: 1
+
 // 当前聚焦的 window(leaf);0 = 无。全局唯一。
 focused_node : mem.Handle
+
+// 悬浮控制台:命令输入框,锚定焦点 window 右上角。
+// 输入缓冲:行超宽时横向滚动(翻页),不折行。
+MAX_CMD_INPUT :: 512
+CommandBar :: struct {
+	visible : bool,
+	input : [MAX_CMD_INPUT]u8, // 输入缓冲
+	len : int, // 已输入字节数
+	view_offset : int, // 横向滚动视口起点(字节),超宽时指向末尾方向
+}
+
+command_bar : CommandBar
+
+// 切换控制台可见性
+ToggleCommandBar :: proc() {
+	command_bar.visible = !command_bar.visible
+	if command_bar.visible {
+		command_bar.len = 0
+		command_bar.view_offset = 0
+	}
+}
+
+CommandBarVisible :: proc() -> bool {
+	return command_bar.visible
+}
+
+// 向控制台输入字节(回车/退格由调用方处理)
+CommandBarFeed :: proc(data : []byte) {
+	for b in data {
+		switch b {
+		case 0x7F, '\b': // 退格:删光标前字符(简化:删末尾)
+			if command_bar.len > 0 {
+				command_bar.len -= 1
+			}
+		case:
+			if command_bar.len < MAX_CMD_INPUT {
+				command_bar.input[command_bar.len] = b
+				command_bar.len += 1
+			}
+		}
+	}
+}
+
+// 取走输入并清空(执行后调用)
+CommandBarTake :: proc() -> string {
+	s := string(command_bar.input[:command_bar.len])
+	command_bar.len = 0
+	command_bar.view_offset = 0
+	return s
+}
+
+// 返回输入缓冲指针(渲染层读取绘制)
+GetCommandBar :: proc() -> ^CommandBar {
+	return &command_bar
+}
 
 InitWindowTree :: proc() {
 	mem.AllocAt(&window_tree_nodes, ROOT_WINDOW_TREE_NODE_ID, WindowTreeNode {
 		is_leaf = true,
+		frame_width = DEFAULT_FRAME_WIDTH,
+		frame_color = DEFAULT_FRAME_COLOR,
 		width = f32(Window_Width),
 		height = f32(Window_Height),
 	})
@@ -116,7 +177,11 @@ DestroyWindowSlot :: proc(h : mem.Handle) {
 }
 
 CreateWindowTreeNode :: proc() -> (h : mem.Handle) {
-	return mem.Alloc(&window_tree_nodes, WindowTreeNode { is_leaf = true })
+	return mem.Alloc(&window_tree_nodes, WindowTreeNode {
+		is_leaf = true,
+		frame_width = DEFAULT_FRAME_WIDTH,
+		frame_color = DEFAULT_FRAME_COLOR,
+	})
 }
 
 GetWindowTreeNode :: proc(h : mem.Handle) -> ^WindowTreeNode {
@@ -451,8 +516,11 @@ treeNodePromote :: proc(parent_h, son_h : mem.Handle) {
 	mem.Free(&window_tree_nodes, parent_h)
 	if gpid.id != 0 {
 		RecalculateTransforms(gpid)
+	} else {
+		// gpid == 0:son 成为新根,几何已继承 parent;但须重算子节点
+		// 布局(左/右子宽仍是旧的一半,不会自动变全宽)
+		RecalculateTransforms(son_h)
 	}
-	// gpid == 0:son 成为新根,几何已继承
 }
 
 TreeNodeSetSplitFactor :: proc(h : mem.Handle, factor : f32) -> bool {

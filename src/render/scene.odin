@@ -16,6 +16,47 @@ Theme :: struct {
 // 每帧绘制入口:只读遍历窗口树
 DrawFrame :: proc(theme : Theme) {
 	drawWalk(cv.WindowTreeRoot(), theme)
+	// 终端内容先上屏(flush 攒的 quad),否则 nano vulg 会画在终端之下
+	FlushBatch()
+	// UI 悬浮层(nanovg):在终端内容之上绘制控件
+	if cv.CommandBarVisible() {
+		UiBegin(screen_w, screen_h) // 需要物理像素尺寸
+		drawCommandBar(theme)
+		UiEnd()
+	}
+}
+
+// 悬浮控制台:nanovg 抗锯齿圆角长条,锚定焦点 window 右上角。
+drawCommandBar :: proc(theme : Theme) {
+	focus := cv.GetFocus()
+	if focus.id == 0 {
+		return
+	}
+	node := cv.GetWindowTreeNode(focus)
+	if node == nil {
+		return
+	}
+	bar := cv.GetCommandBar()
+	text := string(bar.input[:bar.len])
+	// 控制台配色:不透明、与终端深底明显区分。
+	// 背景 = 终端 fg(浅),文字 = 终端 bg(深)—— 高对比反色,悬浮清晰。
+	bar_fg := theme.fg
+	bar_text := theme.bg
+	UiDrawCommandBar(node.position_x, node.position_y, node.width, node.height, text, bar_fg, bar_text, 1.0)
+}
+
+// 颜色混合:a 向 b 偏移 t(0..1),0xRRGGBB
+mixColor :: proc(a, b : u32, t : f32) -> u32 {
+	ar := f32(a >> 16 & 0xFF)
+	ag := f32(a >> 8 & 0xFF)
+	ab := f32(a & 0xFF)
+	br := f32(b >> 16 & 0xFF)
+	bg := f32(b >> 8 & 0xFF)
+	bb := f32(b & 0xFF)
+	cr := u32(ar + (br - ar) * t)
+	cg := u32(ag + (bg - ag) * t)
+	cb := u32(ab + (bb - ab) * t)
+	return cr << 16 | cg << 8 | cb
 }
 
 drawWalk :: proc(node_h : mem.Handle, theme : Theme) {
@@ -24,13 +65,39 @@ drawWalk :: proc(node_h : mem.Handle, theme : Theme) {
 		return
 	}
 	if !node.is_leaf {
+		// 先画子树(背景被 frame 覆盖),再画分割条
 		drawWalk(node.left_son_id, theme)
 		drawWalk(node.right_son_id, theme)
+		drawFrame(node_h)
 		return
 	}
 	win := cv.NodeWindow(node_h)
 	if win != nil && win.console_id.id != 0 {
 		drawConsole(node_h, theme)
+	}
+}
+
+// 分割条:内部节点按 split_type 画一条 frame 宽度的色条
+drawFrame :: proc(node_h : mem.Handle) {
+	node := cv.GetWindowTreeNode(node_h)
+	if node == nil {
+		return
+	}
+	fw := f32(node.frame_width)
+	if fw <= 0 {
+		return
+	}
+	left := cv.GetWindowTreeNode(node.left_son_id)
+	if left == nil {
+		return
+	}
+	switch node.split_type {
+	case .LeftRight:
+		// 竖条:紧贴左子右边界
+		DrawRect(left.position_x + left.width, node.position_y, fw, node.height, node.frame_color)
+	case .UpDown:
+		// 横条:紧贴左(上)子下边界
+		DrawRect(node.position_x, left.position_y + left.height, node.width, fw, node.frame_color)
 	}
 }
 
