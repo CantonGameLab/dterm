@@ -6,9 +6,11 @@ package font
 
 import stbtt "vendor:stb/truetype"
 import gl "vendor:OpenGL"
+import win "core:sys/windows"
 import "core:c"
 import "core:os"
 import "core:math"
+import "core:strings"
 import mem "../memory"
 
 // ---------------------------------------------------------------------------
@@ -53,6 +55,7 @@ Face :: struct {
 	data : []byte, // 字体文件内容;stbtt 表指针引用它,必须保活
 	info : stbtt.fontinfo,
 	scale : f32, // ScaleForPixelHeight(size)
+	sfnt_off : int, // sfnt 目录偏移(TTC 非 0),表定位用
 }
 
 // 字形缓存条目(哈希表,线性探测)
@@ -89,6 +92,8 @@ Font :: struct {
 	antialias : u8, // 光栅化超采样倍数 1-3;相对静止,LoadFont 时一次设定
 	cell_width, cell_height : f32,
 	ascent : f32,
+	path : string, // 加载路径(去重键:同 path+size 复用,不重复加载)
+	size : f32, // 字号(去重键)
 	slots : [dynamic]GlyphSlot,
 	slot_count : u32,
 	atlas : Atlas,
@@ -102,22 +107,333 @@ fonts : mem.GenArray(MAX_FONT_SLOTS, Font)
 // 对外接口
 // ---------------------------------------------------------------------------
 
+// 规范化字体名:去尾部 "(TrueType)"/"(OpenType)"/"(All res)" 等注记,忽略空格/连字符/下划线,大写。
+// 使 "FiraCodeNerdFontMono" 与显示名 "FiraCode Nerd Font Mono (TrueType)" 互相命中。
+// 结果写入调用方缓冲(Odin 的 string([]byte) 是零拷贝 cast,不能返回栈上缓冲)。
+normalizeFontName :: proc(s : string, buf : []byte) -> string {
+	n := 0
+	end := len(s)
+	if end > 0 && s[end - 1] == ')' {
+		for i := end - 1; i >= 0; i -= 1 {
+			if s[i] == '(' {
+				end = i
+				break
+			}
+		}
+	}
+	for i in 0 ..< end {
+		c := s[i]
+		switch c {
+		case ' ', '-', '_':
+			continue
+		}
+		if n >= len(buf) - 1 {
+			break
+		}
+		if c >= 'a' && c <= 'z' {
+			c -= 32
+		}
+		buf[n] = c
+		n += 1
+	}
+	return string(buf[:n])
+}
+
+// 字体内 name 表的 family(1)/fullname(4) 名,规范化后输出到 out(权威显示名:
+// 注册表值名如 "FiraCode Nerd Font Mono Reg" 是安装器缩写,字体文件内才是用户所见名)。
+faceFamilyName :: proc(f : ^Face, out : []byte) -> string {
+	tmp : [160]byte
+	combos := [?][3]c.int{{3, 1, 0x409}, {3, 1, 0}, {1, 0, 0}} // (platform, encoding, language)
+	name_ids := [?]c.int{1, 4}
+	for combo in combos {
+		for name_id in name_ids {
+			length : c.int
+			p := stbtt.GetFontNameString(&f.info, &length, stbtt.PLATFORM_ID(combo[0]), combo[1], combo[2], name_id)
+			if p == nil || length <= 0 {
+				continue
+			}
+			raw := (cast([^]u8)p)[:int(length)]
+			m := 0 // UTF-16BE → ASCII(字体名是拉丁字符,直接取低字节)
+			for i := 0; i + 1 < int(length); i += 2 {
+				if m >= len(tmp) {
+					break
+				}
+				tmp[m] = raw[i + 1]
+				m += 1
+			}
+			if m == 0 {
+				continue
+			}
+			if r := normalizeFontName(string(tmp[:m]), out); len(r) > 0 {
+				return r
+			}
+		}
+	}
+	return ""
+}
+
+// 打开字体文件读 family 名(轻量:只取 info,读完即弃)
+faceFamilyNameFromPath :: proc(path : string, out : []byte) -> string {
+	f, ok := faceLoad(path, 12)
+	if !ok {
+		return ""
+	}
+	defer delete(f.data)
+	return faceFamilyName(&f, out)
+}
+
+// 注册表字体名 → 文件路径:HKLM\...\CurrentVersion\Fonts 的值名 = 显示名,值 = 文件名/路径。
+// Windows 的"字体名"(如 FiraCode Nerd Font Mono)与文件名(FiraCodeNerdFontMono-Regular.ttf)
+// 关系无规则,注册表是唯一可靠映射。匹配顺序:
+//   1. 前缀命中(注册表名可能带权重缩写 Reg/Ret 等)→ 用文件内 family 名校验(输入即用户所见名)
+//   2. 精确命中 → 文件内 family 校验通过即返回;否则作为兜底
+// 命中返回堆分配路径(调用方释放)。
+registryFontPath :: proc(input : string) -> (path : string, ok : bool) {
+	key : win.HKEY
+	sub := win.utf8_to_wstring(`SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts`)
+	if win.RegOpenKeyExW(win.HKEY_LOCAL_MACHINE, sub, 0, win.KEY_READ, &key) != 0 {
+		return "", false
+	}
+	defer win.RegCloseKey(key)
+
+	target_buf : [256]byte
+	target := normalizeFontName(input, target_buf[:])
+
+	exact_file : string
+	exact_ok := false
+
+	Cand :: struct {
+		full : string,
+		prefer : bool, // regular 档(非粗/斜/细);同 family 多字重优先
+	}
+	cands : [dynamic]Cand
+	defer delete(cands) // 元素 full 是堆字符串,由下方清理;delete 只在返回路径释放
+
+	disp_buf : [128]u8
+	d_buf : [256]byte
+	name_buf : [512]u16
+	data_buf : [1024]u8
+	for idx : u32 = 0; ; idx += 1 {
+		name_len := u32(len(name_buf))
+		data_len := u32(len(data_buf))
+		if win.RegEnumValueW(key, idx, &name_buf[0], &name_len, nil, nil, cast(^win.BYTE)&data_buf[0], &data_len) != 0 {
+			break
+		}
+		disp := win.utf16_to_utf8_buf(disp_buf[:], name_buf[:name_len])
+		d := normalizeFontName(disp, d_buf[:])
+		is_exact := d == target
+		is_pref := strings.has_prefix(d, target)
+		if !is_exact && !is_pref {
+			continue
+		}
+		// 值 = REG_SZ(UTF-16,含尾部 NUL),手动拷贝避免对齐问题
+		n16 := int(data_len) / 2
+		if n16 > 0 && data_buf[n16 * 2 - 2] == 0 && data_buf[n16 * 2 - 1] == 0 {
+			n16 -= 1
+		}
+		ws := make([]u16, n16, context.temp_allocator)
+		for i in 0 ..< n16 {
+			ws[i] = u16(data_buf[i * 2]) | u16(data_buf[i * 2 + 1]) << 8
+		}
+		file, _ := win.utf16_to_utf8_alloc(ws, context.temp_allocator)
+		full := file
+		if !strings.contains(file, "\\") && !strings.contains(file, "/") {
+			full = strings.concatenate({SYSTEM_FONT_DIR, file})
+		}
+		if is_exact {
+			exact_file = strings.clone(full)
+			exact_ok = true
+		}
+		// 文件内 family 名是最终权威(注册表名可能带权重缩写 Reg/Ret 等)
+		fam_buf : [256]byte
+		if fam := faceFamilyNameFromPath(full, fam_buf[:]); fam == target {
+			prefer := !strings.contains(d, "BOLD") &&
+				!strings.contains(d, "LIGHT") &&
+				!strings.contains(d, "ITALIC") &&
+				!strings.contains(d, "MEDIUM") &&
+				!strings.contains(d, "MED") &&
+				!strings.contains(d, "SEMI") &&
+				!strings.contains(d, "SEMB") &&
+				!strings.contains(d, "BLACK")
+			append(&cands, Cand { full = strings.clone(full), prefer = prefer })
+		}
+	}
+	// 候选选择:regular 档优先,否则第一个
+	if len(cands) > 0 {
+		sel := 0
+		for i in 0 ..< len(cands) {
+			if cands[i].prefer {
+				sel = i
+				break
+			}
+		}
+		ret := cands[sel].full
+		for i in 0 ..< len(cands) {
+			if i != sel {
+				delete(cands[i].full)
+			}
+		}
+		return ret, true
+	}
+	if exact_ok {
+		return exact_file, true
+	}
+	return "", false
+}
+
+// 解析字体输入:优先当作系统字体名(系统目录 + .ttf/.otf/.ttc),找到返回完整路径;
+// 否则原样返回(按完整路径处理)。
+// 命中系统字体时返回堆分配字符串(调用方负责 release),未命中返回 path_or_name(借用)。
+resolveFontPath :: proc(path_or_name : string) -> (path : string, is_alloc : bool) {
+	// 已含盘符/路径分隔符:视为完整路径,直接返回
+	if strings.contains(path_or_name, "\\") || strings.contains(path_or_name, "/") {
+		return path_or_name, false
+	}
+	// 系统字体名:拼 目录 + name + .ttf / .otf / .ttc
+	exts : [3]string = {".ttf", ".otf", ".ttc"}
+	candidate_buf : [512]u8
+	for ext in exts {
+		n := 0
+		for c in SYSTEM_FONT_DIR {
+			if n >= len(candidate_buf) - 8 {
+				break
+			}
+			candidate_buf[n] = byte(c)
+			n += 1
+		}
+		for c in path_or_name {
+			if n >= len(candidate_buf) - 8 {
+				break
+			}
+			candidate_buf[n] = byte(c)
+			n += 1
+		}
+		for c in ext {
+			if n >= len(candidate_buf) {
+				break
+			}
+			candidate_buf[n] = byte(c)
+			n += 1
+		}
+		candidate := string(candidate_buf[:n])
+		if os.exists(candidate) {
+			return strings.clone(candidate), true // 堆分配:栈缓冲出函数即失效
+		}
+	}
+	// 系统目录里没有:显示名 → 注册表映射(如 "FiraCode Nerd Font Mono" → FiraCodeNerdFontMono-Regular.ttf)
+	if p, ok := registryFontPath(path_or_name); ok {
+		return p, true
+	}
+	// 都没有:原样返回(当作完整路径)
+	return path_or_name, false
+}
+
 GetFont :: proc(h : mem.Handle) -> ^Font {
 	return mem.Get(&fonts, h)
 }
 
+// ---------------------------------------------------------------------------
+// 字体度量:DWrite(Windows Terminal)兼容语义
+// ---------------------------------------------------------------------------
+
+u16be :: proc(data : []byte, off : int) -> u16 {
+	return u16(data[off]) << 8 | u16(data[off + 1])
+}
+i16be :: proc(data : []byte, off : int) -> i16 {
+	return i16(u16be(data, off))
+}
+u32be :: proc(data : []byte, off : int) -> u32 {
+	return u32(data[off]) << 24 | u32(data[off + 1]) << 16 | u32(data[off + 2]) << 8 | u32(data[off + 3])
+}
+
+// sfnt 目录表定位(base = 目录起始,TTC 需 face 实际偏移)
+sfntTableOffset :: proc(data : []byte, base : int, tag : string) -> int {
+	n := int(u16be(data, base + 4))
+	for i in 0 ..< n {
+		rec := base + 12 + i * 16
+		if string(data[rec:rec + 4]) == tag {
+			return int(u32be(data, rec + 8))
+		}
+	}
+	return -1
+}
+
+// OS/2 表可选度量(fsSelection bit7 = USE_TYPO_METRICS,见 OpenType spec)
+OS2_USE_TYPO_METRICS :: 0x0080
+
+// 与 DirectWrite IDWriteFontFace::GetMetrics 同语义(参考 Wine 的 dwrite 兼容实现):
+//   1. fsSelection 置 USE_TYPO_METRICS 且 OS/2 v1+ → sTypoAscender/sTypoDescender/sTypoLineGap
+//   2. 否则有 OS/2 → usWinAscent/usWinDescent(为全角/重音留白),lineGap 取 hhea
+//   3. 无 OS/2 → hhea
+// 返回设计单位;desc 归一为**正数**(hhea/typo 的 desc 是负 i16,DWrite 报正值)。
+// 注意:lineGap **不参与格高**。WPF GlyphTypeface(DWrite 引擎)实测:
+//   CascadiaCode/Mono 格高=2380 单位(1900+480),consola 格高=2398(usWin 1884+514),
+//   lineGap(350)被忽略;基线=ascent 原值。DWrite 行高语义 = asc+desc。
+faceMetrics :: proc(f : ^Face) -> (asc, desc, lg : f32) {
+	a, d, l : c.int
+	stbtt.GetFontVMetrics(&f.info, &a, &d, &l)
+	asc, desc, lg = f32(a), f32(-d), 0
+	os2 := sfntTableOffset(f.data, f.sfnt_off, "OS/2")
+	if os2 < 0 {
+		return
+	}
+	if u16be(f.data, os2) >= 1 {
+		sel := u16be(f.data, os2 + 62)
+		if sel & OS2_USE_TYPO_METRICS != 0 {
+			asc = f32(i16be(f.data, os2 + 68))
+			desc = f32(-i16be(f.data, os2 + 70))
+			return
+		}
+	}
+	asc = f32(u16be(f.data, os2 + 74))
+	desc = f32(u16be(f.data, os2 + 76)) // usWin desc 本身为正
+	return
+}
+
+// WT(AtlasEngine)公式:cell = round(advanceHeight);baseline = round(ascent + (lineGap + cell - advanceHeight)/2)
+// advanceHeight = asc + desc + lg。字形位置由此唯一决定,不再做字形 box 居中。
+cellAndBaseline :: proc(f : ^Face) -> (cell_h, baseline : f32) {
+	asc, desc, lg := faceMetrics(f)
+	s := f.scale
+	adv_h := (asc + desc + lg) * s
+	cell_h = math.round(adv_h)
+	baseline = math.round(asc * s + (lg * s + cell_h - adv_h) * 0.5)
+	return
+}
+
+// 系统字体目录(Windows)
+SYSTEM_FONT_DIR :: "C:\\Windows\\Fonts\\"
+
 // antialias:光栅化超采样倍数(1 = 整数网格,2 = 2x2 超采样)。
 // 默认 1:oversample=2 的 subpixel 相位(-0.25)会让同一笔画在不同字形里
 // 灰度分布不同(横线粗细/明暗不一);整数光栅化所有字形一致。
-LoadFont :: proc(path : string, size : f32, antialias : u8 = 1) -> (h : mem.Handle, ok : bool) {
+// 输入 path_or_name:优先当作字体名去系统目录找(`${SYSTEM_FONT_DIR}name.ttf/.otf/.ttc`),
+// 找不到再当作完整路径加载。
+// 去重:同 (path, size) 直接返回已有字体(字体全局共享,不重复加载/不随窗口销毁)。
+LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1) -> (h : mem.Handle, ok : bool) {
 	if size <= 0 {
 		return {}, false
+	}
+	// 解析:先按系统字体名找,再按完整路径
+	path, path_alloc := resolveFontPath(path_or_name)
+
+	// 同 path+size 复用已加载的字体(跨窗口共享)
+	for i in 1 ..< MAX_FONT_SLOTS {
+		if mem.Alive(&fonts, i) && fonts.data[i].path == path && fonts.data[i].size == size {
+			if path_alloc {
+				delete(path) // 堆分配副本,未入字体则释放
+			}
+			return mem.Handle { id = u32(i), generation = fonts.generations[i] }, true
+		}
 	}
 	font := Font { antialias = max(1, min(3, antialias)) }
 	font.slots = make([dynamic]GlyphSlot, 64) // 哈希桶,装 0.75 后翻倍
 	face, fok := faceLoad(path, size)
 	if !fok {
 		delete(font.slots)
+		if path_alloc {
+			delete(path)
+		}
 		return {}, false
 	}
 	font.faces[0] = face
@@ -140,17 +456,27 @@ LoadFont :: proc(path : string, size : f32, antialias : u8 = 1) -> (h : mem.Hand
 	// 主字体 GSUB(连体规则);解析失败 = 无连体,ShapeLine 空转
 	font.gsub = ParseGsub(font.faces[0].data)
 
-	// 格子度量:同字号下各 face 同 scale,取主 face
+	// 格子度量:与 WT(AtlasEngine)同公式——表选择(USW/TYPO)由 faceMetrics 决定,
+	// cell = round((asc+desc+lg)*scale),baseline = round(asc*s + (lg*s + cell - advH)/2)。
+	// 弃用字形 box 居中(与 WT 不一致,正是 consola 偏上根源)。
 	f := &font.faces[0]
-	ascent, descent, line_gap : c.int
-	stbtt.GetFontVMetrics(&f.info, &ascent, &descent, &line_gap)
-	font.cell_height = math.ceil((f32(ascent) - f32(descent) + f32(line_gap)) * f.scale)
-	font.ascent = f32(ascent) * f.scale
+	cell_h, base := cellAndBaseline(f)
+	font.cell_height = cell_h
+	font.ascent = base
 	advance : c.int
 	stbtt.GetCodepointHMetrics(&f.info, 'M', &advance, nil)
 	font.cell_width = math.ceil(f32(advance) * f.scale)
 
 	atlasInit(&font.atlas)
+
+	// 去重键:path_alloc 时所有权直接转移(不 clone),否则 clone
+	// Font 生命周期与程序一致(不随窗口销毁)
+	if path_alloc {
+		font.path = path
+	} else {
+		font.path = strings.clone(path)
+	}
+	font.size = size
 
 	h = mem.Alloc(&fonts, font)
 	if h.id == 0 {
@@ -283,8 +609,8 @@ faceLoad :: proc(path : string, size : f32) -> (Face, bool) {
 	if err != nil {
 		return {}, false
 	}
-	face := Face { data = data }
 	offset := stbtt.GetFontOffsetForIndex(cast([^]byte)raw_data(data), 0) // ttc 取第 0 个
+	face := Face { data = data, sfnt_off = int(offset) }
 	if offset < 0 || !stbtt.InitFont(&face.info, cast([^]byte)raw_data(data), offset) {
 		delete(data)
 		return {}, false
@@ -302,8 +628,8 @@ faceLoadFallback :: proc(path : string, main_em_px : f32) -> (Face, bool) {
 	if err != nil {
 		return {}, false
 	}
-	face := Face { data = data }
 	offset := stbtt.GetFontOffsetForIndex(cast([^]byte)raw_data(data), 0)
+	face := Face { data = data, sfnt_off = int(offset) }
 	if offset < 0 || !stbtt.InitFont(&face.info, cast([^]byte)raw_data(data), offset) {
 		delete(data)
 		return {}, false
@@ -324,6 +650,7 @@ fontFree :: proc(font : ^Font) {
 	}
 	delete(font.slots)
 	delete(font.atlas.pixels)
+	delete(font.path)
 	gl.DeleteTextures(1, &font.atlas.texture)
 }
 

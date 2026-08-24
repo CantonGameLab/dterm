@@ -83,7 +83,7 @@ Valid :: proc(ga : ^GenArray($N, $T), h : Handle) -> bool {
 	return ga.generations[id] == h.generation
 }
 
-// 槽位存活判定(枚举用):分配过且不在空闲栈。O(pool_count),仅冷路径遍历用
+// 按槽位存活判定(枚举用):分配过且不在空闲栈。O(pool_count),仅冷路径遍历用
 Alive :: proc(ga : ^GenArray($N, $T), i : int) -> bool {
 	if i <= 0 || i >= ga.next {
 		return false
@@ -94,4 +94,12 @@ Alive :: proc(ga : ^GenArray($N, $T), i : int) -> bool {
 		}
 	}
 	return true
+}
+
+// 按槽位取存活对象(枚举用,与 Alive 配对;跨层清理引用等冷路径)
+GetIndex :: proc(ga : ^GenArray($N, $T), i : int) -> ^T {
+	if !Alive(ga, i) {
+		return nil
+	}
+	return &ga.data[i]
 }

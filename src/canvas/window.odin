@@ -6,6 +6,7 @@ package canvas
 import ct "../conpty"
 import fnt "../font"
 import mem "../memory"
+import "core:fmt"
 
 // ---------------------------------------------------------------------------
 // 窗口树
@@ -49,25 +50,11 @@ DestroyWindow :: proc(id : mem.Handle = {}) -> bool {
 		return false
 	}
 	win_h := node.window_id
-	if win_h.id != 0 {
-		win := GetWindow(win_h)
-		if win != nil {
-			// 关闭 console 应用 + 会话
-			if win.console_id.id != 0 {
-				console := GetConsole(win.console_id)
-				if console != nil {
-					if console.conpty_handle.id != 0 {
-						ct.StopReadThread(console.conpty_handle)
-						ct.DestroyConpty(console.conpty_handle)
-					}
-					DestroyConsole(win.console_id)
-				}
-			}
-			// 释放窗口字体
-			if win.font_id.id != 0 {
-				fnt.DestroyFont(win.font_id)
-			}
-		}
+	if win := GetWindow(node.window_id); win != nil {
+		// 关闭会话:先断引用再销毁(GenArray 句柄各自判定,DestroyConsole 只销毁本体)
+		clearConsoleRefs(win.console_id)
+		DestroyConsole(win.console_id)
+		// 字体不销毁:全局共享(同 path+size 复用,其他窗口可能仍引用)
 		DestroyWindowSlot(win_h)
 	}
 	// 焦点落在被删窗:移到兄弟(顶替父位);兄弟内部节点则取最左 leaf
@@ -140,59 +127,122 @@ ExchangeWindow :: proc(dir : FocusDirection, id : mem.Handle = {}) -> bool {
 SetWindowFont :: proc(path : string, size : f32, id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
+		fmt.eprintln("SWF: no window")
 		return false
 	}
 	win := ensureWindow(node_h)
 	if win == nil {
+		fmt.eprintln("SWF: no win obj")
 		return false
 	}
 	new_font, ok := fnt.LoadFont(path, size)
 	if !ok {
+		fmt.eprintln("SWF: LoadFont failed:", path, size)
 		return false
 	}
-	if win.font_id.id != 0 {
-		fnt.DestroyFont(win.font_id)
-	}
+	// 字体全局共享(同 path+size 复用 LoadFont 返回同一 handle),
+	// 旧字体不销毁:其他窗口可能仍引用;仅窗口指针指向新字体
 	win.font_id = new_font
-	// 若 console 已存在则立即应用
-	if win.console_id.id != 0 {
-		if console := GetConsole(win.console_id); console != nil {
-			console.font_id = new_font
-		}
+	// 若 console 已存在则立即应用(句柄有效性由 GenArray 判定)
+	if console := GetConsole(win.console_id); console != nil {
+		console.font_id = new_font
 	}
 	return true
+}
+
+// 清空 id(或焦点)window 的会话:销毁其 console + ConPTY,窗口与字体保留,
+// 之后可再次 LaunchConsole。与 DestroyWindow 不同,不删窗口。
+ClearWindowConsole :: proc(id : mem.Handle = {}) -> bool {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		fmt.eprintln("CWC: no node")
+		return false
+	}
+	win := NodeWindow(node_h)
+	if win == nil || GetConsole(win.console_id) == nil { // 句柄有效性由 GenArray 判定
+		fmt.eprintln("CWC: no console")
+		return false
+	}
+	clearConsoleRefs(win.console_id)
+	DestroyConsole(win.console_id)
+	return true
+}
+
+// 断掉所有指向 console_h 的引用(窗口 console_id + 工具浮层 console_id)。
+// 窗口层销毁会话前的第一步:避免悬挂句柄让"空闲窗口"被误判占用。
+clearConsoleRefs :: proc(h : mem.Handle) {
+	for i in 0 ..< MAX_WINDOW_SLOTS {
+		if w := mem.GetIndex(&windows, i); w != nil {
+			if w.console_id == h {
+				w.console_id = {}
+			}
+			for &it in w.iterms {
+				if it.console_id == h {
+					it.console_id = {}
+				}
+			}
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
 // 会话(Console 应用)
 // ---------------------------------------------------------------------------
 
-// 在 id(或焦点)window 用 cmd 打开一个 console 应用;要求已设置字体(SetWindowFont)
+// launch 语义:在 id(或焦点)window 启动一个 console 应用。
+//   - 窗口空闲(无 console)→ 直接启动
+//   - 已被占用 → 自动 split 出兄弟窗(继承字体)再启动,新窗成为焦点
+//   - 明确失败:无可启动节点 / 无字体
 LaunchConsole :: proc(cmd : string, id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
+		fmt.eprintln("LC: no node")
 		return false
 	}
 	win := NodeWindow(node_h)
 	if win == nil {
-		return false // 无窗口,先 SetWindowFont(自动建窗)
+		win = ensureWindow(node_h)
+		if win == nil {
+			fmt.eprintln("LC: no win obj")
+			return false
+		}
 	}
-	if win.console_id.id != 0 {
-		return false // 已有 console,不覆盖
+	// 已有有效 console:不覆盖,split 一个新窗承载新会话;
+	// 空/悬挂引用由 GenArray 判定 == nil,一律视为空闲(自愈清 0)
+	if GetConsole(win.console_id) != nil {
+		_, new_h, ok := TreeNodeSplit(node_h, .LeftRight, 0.5)
+		if !ok {
+			fmt.eprintln("LC: split failed")
+			return false
+		}
+		win2 := ensureWindow(new_h)
+		if win2 == nil {
+			fmt.eprintln("LC: no win obj (new)")
+			return false
+		}
+		win2.font_id = win.font_id // 继承字体(已有 console 说明已设字体)
+		SetFocus(new_h)
+		node_h, win = new_h, win2
+	} else {
+		win.console_id = {}
 	}
-	if win.font_id.id == 0 {
+	if fnt.GetFont(win.font_id) == nil {
+		fmt.eprintln("LC: no font")
 		return false // 未设置字体,先 SetWindowFont
 	}
 	conpty_h, ok := ct.CreateConptyContext({80, 24}, cmd)
 	if !ok {
+		fmt.eprintln("LC: CreateConptyContext failed:", cmd)
 		return false
 	}
 	if !ct.StartReadThread(conpty_h) {
+		fmt.eprintln("LC: StartReadThread failed:", cmd)
 		ct.DestroyConpty(conpty_h)
 		return false
 	}
 	console_h, cok := CreateConsole(24, 80, conpty_h)
 	if !cok {
+		fmt.eprintln("LC: CreateConsole failed:", cmd)
 		ct.StopReadThread(conpty_h)
 		ct.DestroyConpty(conpty_h)
 		return false
@@ -211,13 +261,14 @@ FeedConsole :: proc(data : []byte, id : mem.Handle = {}) -> bool {
 		return false
 	}
 	win := NodeWindow(node_h)
-	if win == nil || win.console_id.id == 0 {
+	if win == nil {
 		return false
 	}
 	console := GetConsole(win.console_id)
-	if console == nil || console.conpty_handle.id == 0 {
+	if console == nil {
 		return false
 	}
+	// conpty 句柄无效(工具 console 等)由 WriteConptyInput 内部返回 false
 	_, ok := ct.WriteConptyInput(console.conpty_handle, data)
 	return ok
 }
@@ -252,13 +303,14 @@ PollSessions :: proc() -> bool {
 	for i in 0 ..< count {
 		node_h := leaves[i]
 		win := NodeWindow(node_h)
-		if win == nil || win.console_id.id == 0 {
-			continue // 无窗口或空窗口,无会话
+		if win == nil {
+			continue // 无窗口
 		}
 		console := GetConsole(win.console_id)
-		if console == nil || console.conpty_handle.id == 0 {
-			continue // 工具 console 无会话
+		if console == nil {
+			continue // 空窗口/悬挂引用,无会话
 		}
+		// conpty 句柄无效(工具 console)时 JobActiveProcesses 返回 -1,视为无会话
 		jobs := ct.JobActiveProcesses(console.conpty_handle)
 		if jobs <= 0 || !ct.IsReadThreadAlive(console.conpty_handle) {
 			// 会话结束:进程树归零 / Job 查询失败(-1,视为结束)/ 读管道断开。
@@ -277,8 +329,8 @@ PollSessions :: proc() -> bool {
 // 消费单个窗口 console 的剩余输出(会话结束前的最后内容)
 updateWindow :: proc(node_h : mem.Handle) {
 	win := NodeWindow(node_h)
-	if win != nil && win.console_id.id != 0 {
-		UpdateConsole(win.console_id)
+	if win != nil {
+		UpdateConsole(win.console_id) // 内部判 console 有效
 	}
 }
 
@@ -297,6 +349,41 @@ collectLeaves :: proc(h : mem.Handle, leaves : ^[MAX_TREE_NODE_SLOTS]mem.Handle,
 	}
 	collectLeaves(node.left_son_id, leaves, count)
 	collectLeaves(node.right_son_id, leaves, count)
+}
+
+// ---------------------------------------------------------------------------
+// 历史滚动(review)
+// ---------------------------------------------------------------------------
+
+// 历史滚动,delta 单位 = 行:
+//   delta > 0 → 向下翻(看更新的内容);delta < 0 → 向上翻(看旧内容,进入 review)
+//   边界:向上翻到历史顶 clamp;向下滚到底(scroll_offset == 0)自动退出 review,
+//   回到普通模式(实时跟随,后续快捷键端点行为以 WT 模式为准)。
+// 数据模型(单真值):视口位置 = scroll_offset(TermBuffer,渲染已消费)。
+//   review 判定   = scroll_offset > 0
+//   review_line   = len(lines) - scroll_offset - 1(当前窗口底行的物理行索引,
+//                   推导值;与窗口树"leaf 几何 = 视口在内容上的锚点"同构,不另存)
+ConsoleScroll :: proc(delta : int, id : mem.Handle = {}) -> bool {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		return false
+	}
+	win := NodeWindow(node_h)
+	if win == nil {
+		return false
+	}
+	console := GetConsole(win.console_id)
+	if console == nil {
+		return false
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return false
+	}
+	// 向下翻 = 视口下移 = offset 减小;负 delta(向上翻)则增大
+	off := int(tb.scroll_offset) - delta
+	// 上限由 ConsoleSetScrollOffset clamp(历史顶),下限 0 = 回到普通模式
+	return ConsoleSetScrollOffset(win.console_id, u32(max(0, off)))
 }
 
 // ---------------------------------------------------------------------------

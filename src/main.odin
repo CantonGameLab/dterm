@@ -2,9 +2,9 @@
 // 布局:
 //   0(root, LeftRight)
 //   ├─ 1(内部, UpDown)
-//   │   ├─ 3(console:GoMono 20 → cmd.exe)
-//   │   └─ 4(console:CascadiaMono 32 → msys2 bash)
-//   └─ 2(console:Cascadia Regular 24 → powershell)
+//   │   ├─ 3(console:CascadiaCode 18 → cmd.exe)
+//   │   └─ 4(console:msyh 26 → msys2 bash)
+//   └─ 2(console:CascadiaMono 22 → powershell)
 package main
 
 import cv "canvas"
@@ -14,12 +14,6 @@ import rd "render"
 import s3 "vendor:sdl3"
 import mem "memory"
 import "core:fmt"
-import "core:strings"
-
-// 字体文件路径
-FONT_CASCADIA :: "./resource/font/CascadiaCode/CaskaydiaCoveNerdFont-Regular.ttf"
-FONT_CASCADIA_MONO :: "./resource/font/CascadiaCode/CaskaydiaCoveNerdFontMono-Regular.ttf"
-FONT_GO_MONO :: "./resource/font/Go-Mono/GoMonoNerdFont-Regular.ttf"
 
 main :: proc() {
 	if !rd.Init() {
@@ -75,44 +69,133 @@ main :: proc() {
 	}
 }
 
-// 控制台输入:逐字节过滤。
-//   回车:执行命令(控制台是专用命令框,无需 ':' 前缀,执行时自动补)
-//   ESC :关闭控制台
-//   退格:删末尾
-//   可打印字符:进缓冲
-//   其他控制符/转义序列:丢弃(避免 F2/方向键等转义当文本)
+// 控制台输入:逐字节解析(含转义序列键)。
+//   回车          :执行命令
+//   裸 ESC(ESC [ 之外的 ESC):关闭控制台
+//   ESC [ A/B/C/D :上/下/右/左(←→ 移动光标)
+//   ESC [ H/F     :Home/End
+//   ESC [ 1;5 D / 1;5 C:Ctrl+Left / Ctrl+Right(按词移动)
+//   退格          :删光标前;Delete(ESC [ 3 ~):删光标后
+//   可打印字符    :光标处插入
+//   其他控制字符  :丢弃
 handleCmdBarInput :: proc(buf : []u8) {
 	for b in buf {
-		switch {
-		case b == '\r' || b == '\n':
-			execCmdBar()
-			return
-		case b == 0x1B: // ESC 关闭控制台
-			cv.ToggleCommandBar()
-			cv.CommandBarTake() // 丢弃未完成输入
-			return
-		case b == 0x7F || b == '\b': // 退格
-			cv.CommandBarFeed(buf[:1])
-		case b < 0x20: // 其他控制字符丢弃
-			continue
-		case:
-			cv.CommandBarFeed(buf[:1])
-		}
+		cmdBarKey(b)
+	}
+	// 本帧结束仍停在"已见 ESC":说明是孤立 ESC 键(无后续序列字节)→ 关闭控制台。
+	// 方向键/Ctrl 组合的 ESC 序列同帧完整到达,不会滞留。
+	if esc_state == 1 {
+		esc_state = 0
+		cv.ToggleCommandBar()
+		cv.CommandBarTake() // 丢弃未完成输入
 	}
 }
 
-// 取走控制台输入并执行(自动补 ':' 前缀)
+// 转义序列解析状态:0 = 无;1 = 已见 ESC;2 = 已见 ESC [;
+// 3 = ESC [ 3 ~(Delete);4 = ESC [ 1;(Ctrl 前缀);5 = ESC [ 1;5(Ctrl+键)
+esc_state : int
+
+cmdBarKey :: proc(b : u8) {
+	switch esc_state {
+	case 1: // 已见 ESC
+		if b == '[' {
+			esc_state = 2
+			return
+		}
+		// 裸 ESC(非 CSI 序列)= 关闭控制台
+		esc_state = 0
+		cv.ToggleCommandBar()
+		cv.CommandBarTake() // 丢弃未完成输入
+		return
+	case 2: // 已见 ESC [ → 识别最终字节
+		esc_state = 0
+		switch b {
+		case 'A', 'B': // 上/下:暂不支持(单行输入),忽略
+			return
+		case 'C': // 右
+			cv.CommandBarCursorMove(1)
+			return
+		case 'D': // 左
+			cv.CommandBarCursorMove(-1)
+			return
+		case 'H': // Home
+			cv.CommandBarHome()
+			return
+		case 'F': // End
+			cv.CommandBarEnd()
+			return
+		case '3': // Delete(ESC [ 3 ~):置状态等 '~'
+			esc_state = 3
+			return
+		case '1': // ESC [ 1(可能接 ';5 C/D' 的 Ctrl 组合)
+			esc_state = 4
+			return
+		case:
+			return
+		}
+	case 3: // ESC [ 3 ~ 的 '~'
+		esc_state = 0
+		if b == '~' {
+			cv.CommandBarDelete()
+		}
+		return
+	case 4: // ESC [ 1;... 的 ';'(修饰键前缀)
+		if b == ';' {
+			esc_state = 5
+			return
+		}
+		esc_state = 0
+		return
+	case 5: // ESC [ 1;5 X:Ctrl+修饰键(数字修饰位可多个,如 5=Ctrl)
+		switch b {
+		case 'C': // Ctrl+Right:按词右移
+			esc_state = 0
+			cv.CommandBarWordMove(1)
+		case 'D': // Ctrl+Left:按词左移
+			esc_state = 0
+			cv.CommandBarWordMove(-1)
+		case '0'..='9':
+			// 修饰位数字(如 5,Ctrl):留在状态 5 等 C/D
+			return
+		case:
+			esc_state = 0
+		}
+		return
+	}
+
+	// 正常输入
+	switch {
+	case b == '\r' || b == '\n':
+		execCmdBar()
+	case b == 0x1B: // 转义序列起始
+		esc_state = 1
+	case b == 0x7F || b == '\b': // 退格
+		cv.CommandBarBackspace()
+	case b < 0x20: // 其他控制字符丢弃
+		return
+	case:
+		single : [1]u8 = { b }
+		cv.CommandBarInsert(single[:])
+	}
+}
+
+// 取走控制台输入并执行。
+// 成功:关闭控制台;失败:保持打开 + 回显错误,便于修正
 execCmdBar :: proc() {
 	cmd := cv.CommandBarTake()
 	if len(cmd) > 0 {
-		prefix := cmd
-		if prefix[0] != ':' {
-			prefix = strings.concatenate({":", cmd})
-			defer delete(prefix)
+		// 控制台是专用命令框,无 ':' 前缀
+		if cv.ExecuteCommandString(cmd) {
+			cv.ToggleCommandBar() // 成功:关闭
+		} else {
+			// 失败:回显错误提示,控制台保持打开
+			fmt.eprintln("CMD FAILED:", cmd)
+			err := "<cmd error>"
+			cv.CommandBarInsert(transmute([]u8)err)
 		}
-		cv.ExecuteCommandString(prefix)
+	} else {
+		cv.ToggleCommandBar()
 	}
-	cv.ToggleCommandBar() // 执行后关闭
 }
 
 // 初始化窗口布局(经用户接口):
@@ -142,16 +225,23 @@ initWindows :: proc() -> bool {
 	win3 := cv.GetFocusWindow() // 上子 3
 
 	// 三个 console 窗:2 / 3 / 4,各自不同字体、大小、cmd
-	// 2:右侧窗,Cascadia 24 → powershell
-	if !setupConsole(win2, FONT_CASCADIA, 24, "powershell.exe -NoExit") {
+	// 字体名走系统目录(LoadFont 先按名找 .ttf/.otf/.ttc,找不到再当路径)
+	// 2:右侧窗,CascadiaMono 22 → powershell
+	if !setupConsole(win2, "CascadiaMono", 22, "powershell.exe -NoExit") {
 		return false
 	}
-	// 3:左上窗,GoMono 20 → cmd
-	if !setupConsole(win3, FONT_GO_MONO, 20, "cmd.exe") {
+	// 3:左上窗,CascadiaCode 18 → cmd
+	if !setupConsole(win3, "CascadiaCode", 18, "cmd.exe") {
 		return false
 	}
-	// 4:左下窗,CascadiaMono 32 → msys2 bash
-	if !setupConsole(win4, FONT_CASCADIA_MONO, 32,
+
+	// 只清会话、保留窗口与字体(窗口用于手动 launch 测试):
+	// 注意:DestroyConsole 参数是 console 句柄,不能直接传窗口句柄(槽 id 会撞车)
+	cv.ClearWindowConsole(win2)
+	cv.ClearWindowConsole(win3)
+
+	// 4:左下窗,msyh 26(.ttc)→ msys2 bash
+	if !setupConsole(win4, "consola", 26,
 		"C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start") {
 		return false
 	}

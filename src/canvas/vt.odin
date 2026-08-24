@@ -275,6 +275,8 @@ vtReset :: proc(console_h : mem.Handle) {
 	console.vt.wrap_pending = false
 	console.vt.origin_mode = false
 	console.vt.deccolm = false
+	console.vt.cursor_visible = true
+	console.vt.cursor_style = 0
 	console.cursor_row, console.cursor_col = 0, 0
 }
 
@@ -353,14 +355,17 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 	if p.num_params > 1 {
 		p1 = p.params[1]
 	}
-	// 私用标记(> ? < =)与中间字节($ SP 等)收集在 intermediate_chars
+	// intermediate_chars 按序混合收集私用标记(0x3C-0x3F:> ? < =)与中间字节(0x20-0x2F:$ SP 等)。
+	// 按值域区分:私用标记恒为首字节,中间字节从其后取(DECSCUSR 仅一个 SP 时也能命中)
 	private := u8(0)
-	if p.num_intermediate_chars > 0 {
+	n_priv := 0
+	if p.num_intermediate_chars > 0 && p.intermediate_chars[0] >= 0x3C && p.intermediate_chars[0] <= 0x3F {
 		private = p.intermediate_chars[0]
+		n_priv = 1
 	}
 	intermediate := u8(0)
-	if p.num_intermediate_chars > 1 {
-		intermediate = p.intermediate_chars[1]
+	if p.num_intermediate_chars > n_priv {
+		intermediate = p.intermediate_chars[n_priv]
 	}
 
 	switch final {

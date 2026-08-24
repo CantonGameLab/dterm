@@ -5,6 +5,7 @@ package render
 import cv "../canvas"
 import fnt "../font"
 import mem "../memory"
+import s3 "vendor:sdl3"
 
 // 默认配色(DEFAULT_COLOR 的解析目标)
 Theme :: struct {
@@ -42,7 +43,8 @@ drawCommandBar :: proc(theme : Theme) {
 	// 背景 = 终端 fg(浅),文字 = 终端 bg(深)—— 高对比反色,悬浮清晰。
 	bar_fg := theme.fg
 	bar_text := theme.bg
-	UiDrawCommandBar(node.position_x, node.position_y, node.width, node.height, text, bar_fg, bar_text, 1.0)
+	UiDrawCommandBar(node.position_x, node.position_y, node.width, node.height,
+		text, bar.cursor, bar_fg, bar_text, 1.0)
 }
 
 // 颜色混合:a 向 b 偏移 t(0..1),0xRRGGBB
@@ -72,8 +74,8 @@ drawWalk :: proc(node_h : mem.Handle, theme : Theme) {
 		return
 	}
 	win := cv.NodeWindow(node_h)
-	if win != nil && win.console_id.id != 0 {
-		drawConsole(node_h, theme)
+	if win != nil {
+		drawConsole(node_h, theme) // 内部按 console 句柄判定,无 console 直返
 	}
 }
 
@@ -192,36 +194,53 @@ drawConsole :: proc(node_h : mem.Handle, theme : Theme) {
 		}
 	}
 
-	// 块状光标:先画光标块,再用底色重绘该格字形保持可见。
-	// 停在宽字符首格时画 2 格宽(覆盖续列)。
-	if console.vt.cursor_visible {
+	// 光标(DECSCUSR):0/1 块(闪烁) 2 块 3/4 下划线 5/6 竖线。
+	// 闪烁样式按 500ms 相位亮/灭;块状先画块再用底色重绘字形,条形不遮字形无需重绘。
+	if console.vt.cursor_visible && cursorBlinkOn(console.vt.cursor_style) {
 		cr := int(console.cursor_row) - visible_top
 		if cr >= 0 && cr < int(console.rows) {
 			cx := console.origin_x + f32(console.cursor_col) * m.cell_width
 			cy := console.origin_y + f32(cr) * m.cell_height
-			cw := m.cell_width
-			line_idx := visible_top + cr
-			if line_idx < len(tb.lines) {
-				line := &tb.lines[line_idx]
-				if int(console.cursor_col) < len(line.cells) {
-					cell := line.cells[int(console.cursor_col)]
-					if cell.cp != 0 && cell.wide {
-						cw = m.cell_width * 2 // 宽字符首格:光标覆盖两格
+			style := console.vt.cursor_style
+			switch {
+			case style == 3 || style == 4: // 下划线:贴格底
+				uh := max(2.0, m.cell_height * 0.08)
+				DrawRect(cx, cy + m.cell_height - uh, m.cell_width, uh, theme.cursor)
+			case style == 5 || style == 6: // 竖线:贴格左边缘,1px
+				DrawRect(cx, cy, 1.0, m.cell_height, theme.cursor)
+			case: // 0/1/2:块;停在宽字符首格时画 2 格宽(覆盖续列)
+				cw := m.cell_width
+				line_idx := visible_top + cr
+				if line_idx < len(tb.lines) {
+					line := &tb.lines[line_idx]
+					if int(console.cursor_col) < len(line.cells) {
+						cell := line.cells[int(console.cursor_col)]
+						if cell.cp != 0 && cell.wide {
+							cw = m.cell_width * 2
+						}
 					}
 				}
-			}
-			DrawRect(cx, cy, cw, m.cell_height, theme.cursor)
-			if line_idx < len(tb.lines) {
-				line := &tb.lines[line_idx]
-				if int(console.cursor_col) < len(line.cells) {
-					cell := line.cells[int(console.cursor_col)]
-					if cell.cp != 0 {
-						DrawRune(console.font_id, cell.cp, cx, cy + m.ascent, theme.bg)
+				DrawRect(cx, cy, cw, m.cell_height, theme.cursor)
+				if line_idx < len(tb.lines) {
+					line := &tb.lines[line_idx]
+					if int(console.cursor_col) < len(line.cells) {
+						cell := line.cells[int(console.cursor_col)]
+						if cell.cp != 0 {
+							DrawRune(console.font_id, cell.cp, cx, cy + m.ascent, theme.bg)
+						}
 					}
 				}
 			}
 		}
 	}
+}
+
+// DECSCUSR 闪烁样式(Ps=1/3/5):500ms 亮、500ms 灭
+cursorBlinkOn :: proc(style : u8) -> bool {
+	if style != 1 && style != 3 && style != 5 {
+		return true
+	}
+	return (s3.GetTicks() / 500) % 2 == 0
 }
 
 resolveColor :: proc(c, default : u32) -> u32 {

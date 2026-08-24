@@ -194,12 +194,15 @@ ConsoleActiveTermBuffer :: proc(console_h : mem.Handle) -> mem.Handle {
 	return console.active_term_buffer_id
 }
 
-// ConPTY 侧由 conpty 包负责,这里只释放视口
+// 销毁 console 本体:会话(读线程 + ConPTY)+ 视口。
+// 本函数不摸窗口层数据;窗口对它的引用由窗口层调用方先经 clearConsoleRefs 断干净。
 DestroyConsole :: proc(h : mem.Handle) {
 	console := GetConsole(h)
 	if console == nil {
 		return
 	}
+	ct.StopReadThread(console.conpty_handle) // 句柄无效 = no-op
+	ct.DestroyConpty(console.conpty_handle)
 	for i in 0 ..< int(console.term_buffer_count) {
 		DestroyTermBuffer(console.term_buffer_ids[i])
 	}
@@ -320,7 +323,7 @@ ConsoleUpdateTree :: proc(node_h : mem.Handle) {
 		return
 	}
 	win := NodeWindow(node_h)
-	if win == nil || win.console_id.id == 0 {
+	if win == nil || GetConsole(win.console_id) == nil {
 		return
 	}
 	console_h := win.console_id

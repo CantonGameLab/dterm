@@ -9,7 +9,8 @@ MAX_KEY_SEQ :: 8
 
 // 返回序列与长度;n=0 表示无可打印序列(交给 TEXT_INPUT)
 translateKey :: proc(k : s3.KeyboardEvent) -> (seq : [MAX_KEY_SEQ]u8, n : int) {
-	// 特殊键(按 scancode,布局无关)
+	// 特殊键(按 scancode,布局无关);Ctrl 修饰会改变序列(Ctrl+方向 = ESC[1;5X)
+	has_ctrl := k.mod & s3.KMOD_CTRL != {}
 	#partial switch k.scancode {
 	case .RETURN:
 		seq[0] = '\r'
@@ -24,15 +25,32 @@ translateKey :: proc(k : s3.KeyboardEvent) -> (seq : [MAX_KEY_SEQ]u8, n : int) {
 		seq[0] = 0x1B
 		return seq, 1
 	case .UP:
+		// Ctrl+Up = ESC[1;5A;普通 = ESC[A
+		if has_ctrl {
+			seq[0], seq[1], seq[2], seq[3], seq[4], seq[5] = 0x1B, '[', '1', ';', '5', 'A'
+			return seq, 6
+		}
 		seq[0], seq[1], seq[2] = 0x1B, '[', 'A'
 		return seq, 3
 	case .DOWN:
+		if has_ctrl {
+			seq[0], seq[1], seq[2], seq[3], seq[4], seq[5] = 0x1B, '[', '1', ';', '5', 'B'
+			return seq, 6
+		}
 		seq[0], seq[1], seq[2] = 0x1B, '[', 'B'
 		return seq, 3
 	case .RIGHT:
+		if has_ctrl {
+			seq[0], seq[1], seq[2], seq[3], seq[4], seq[5] = 0x1B, '[', '1', ';', '5', 'C'
+			return seq, 6
+		}
 		seq[0], seq[1], seq[2] = 0x1B, '[', 'C'
 		return seq, 3
 	case .LEFT:
+		if has_ctrl {
+			seq[0], seq[1], seq[2], seq[3], seq[4], seq[5] = 0x1B, '[', '1', ';', '5', 'D'
+			return seq, 6
+		}
 		seq[0], seq[1], seq[2] = 0x1B, '[', 'D'
 		return seq, 3
 	case .HOME:

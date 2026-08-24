@@ -1,9 +1,9 @@
 // 指令语法解析:字符串 → 直接调用 canvas 用户接口(window.odin)。
 // 供控制台交互 / 子进程 ANSI 指令通道使用。薄分派层,无 undo / 无历史栈。
-// 语法::命令名 参数... [@id]
+// 语法:命令名 参数... [@id]
 //   - 参数按空格分隔,"..." 包裹字符串
 //   - @id 放末尾指定目标节点(缺省 = 当前焦点)
-// 例::split right 0.5 / :focus left / :font "a.ttf" 40 / :launch "cmd.exe" @3
+// 例:split right 0.5 / focus left / font "a.ttf" 40 / launch "cmd.exe" @3
 package canvas
 
 import "core:fmt"
@@ -83,11 +83,11 @@ ParsedCommand :: struct {
 // 把命令字符串解析为 ParsedCommand;字符串字段借用 s 内存(调用方保证 s 存活于本次调用)
 ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 	trimmed := strings.trim_space(s)
-	if len(trimmed) == 0 || trimmed[0] != ':' {
+	if len(trimmed) == 0 {
 		return {}, false
 	}
 	tokens : [16]string
-	n := parseTokens(trimmed[1:], &tokens)
+	n := parseTokens(trimmed, &tokens)
 	if n == 0 {
 		return {}, false
 	}

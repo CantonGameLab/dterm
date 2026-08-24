@@ -93,13 +93,14 @@ DEFAULT_FRAME_WIDTH :: 1
 focused_node : mem.Handle
 
 // 悬浮控制台:命令输入框,锚定焦点 window 右上角。
-// 输入缓冲:行超宽时横向滚动(翻页),不折行。
+// 输入缓冲:行超宽时横向滚动(翻页),不折行;光标在缓冲内可自由移动。
 MAX_CMD_INPUT :: 512
 CommandBar :: struct {
 	visible : bool,
 	input : [MAX_CMD_INPUT]u8, // 输入缓冲
 	len : int, // 已输入字节数
-	view_offset : int, // 横向滚动视口起点(字节),超宽时指向末尾方向
+	cursor : int, // 光标位置(字节,0..len;插入点)
+	view_offset : int, // 横向滚动视口起点(字节),跟随光标
 }
 
 command_bar : CommandBar
@@ -109,6 +110,7 @@ ToggleCommandBar :: proc() {
 	command_bar.visible = !command_bar.visible
 	if command_bar.visible {
 		command_bar.len = 0
+		command_bar.cursor = 0
 		command_bar.view_offset = 0
 	}
 }
@@ -117,20 +119,88 @@ CommandBarVisible :: proc() -> bool {
 	return command_bar.visible
 }
 
-// 向控制台输入字节(回车/退格由调用方处理)
-CommandBarFeed :: proc(data : []byte) {
+// 在光标处插入字节(0 = 光标前插入)
+CommandBarInsert :: proc(data : []byte) {
 	for b in data {
-		switch b {
-		case 0x7F, '\b': // 退格:删光标前字符(简化:删末尾)
-			if command_bar.len > 0 {
-				command_bar.len -= 1
+		if command_bar.len >= len(command_bar.input) {
+			break
+		}
+		// 光标后字符右移
+		for i := command_bar.len; i > command_bar.cursor; i -= 1 {
+			command_bar.input[i] = command_bar.input[i - 1]
+		}
+		command_bar.input[command_bar.cursor] = b
+		command_bar.cursor += 1
+		command_bar.len += 1
+	}
+}
+
+// 退格:删光标前一个字符
+CommandBarBackspace :: proc() {
+	if command_bar.cursor <= 0 {
+		return
+	}
+	for i := command_bar.cursor - 1; i < command_bar.len - 1; i += 1 {
+		command_bar.input[i] = command_bar.input[i + 1]
+	}
+	command_bar.cursor -= 1
+	command_bar.len -= 1
+}
+
+// Delete:删光标后一个字符
+CommandBarDelete :: proc() {
+	if command_bar.cursor >= command_bar.len {
+		return
+	}
+	for i := command_bar.cursor; i < command_bar.len - 1; i += 1 {
+		command_bar.input[i] = command_bar.input[i + 1]
+	}
+	command_bar.len -= 1
+}
+
+// 光标左右移动(1 = 右,-1 = 左)
+CommandBarCursorMove :: proc(dir : int) {
+	command_bar.cursor = clamp(command_bar.cursor + dir, 0, command_bar.len)
+}
+
+// 光标移动到行首/行尾
+CommandBarHome :: proc() {
+	command_bar.cursor = 0
+}
+
+CommandBarEnd :: proc() {
+	command_bar.cursor = command_bar.len
+}
+
+// 按词左右移动(跳过空白到下一个词边界)
+CommandBarWordMove :: proc(dir : int) {
+	is_space :: proc(b : u8) -> bool {
+		return b == ' ' || b == '\t'
+	}
+	c := command_bar.cursor
+	if dir > 0 {
+		// 右移:跳过当前词和中间空白,停在下一词首
+		for c < command_bar.len && is_space(command_bar.input[c]) {
+			c += 1
+		}
+		for c < command_bar.len && !is_space(command_bar.input[c]) {
+			c += 1
+		}
+		command_bar.cursor = c
+	} else {
+		// 左移:跳过前词和前空白,停在前一非空白后(或 0)
+		if c > 0 {
+			// 跳过光标前空白
+			c -= 1
+			for c > 0 && is_space(command_bar.input[c - 1]) {
+				c -= 1
 			}
-		case:
-			if command_bar.len < MAX_CMD_INPUT {
-				command_bar.input[command_bar.len] = b
-				command_bar.len += 1
+			// 跳到词首
+			for c > 0 && !is_space(command_bar.input[c - 1]) {
+				c -= 1
 			}
 		}
+		command_bar.cursor = c
 	}
 }
 
@@ -138,6 +208,7 @@ CommandBarFeed :: proc(data : []byte) {
 CommandBarTake :: proc() -> string {
 	s := string(command_bar.input[:command_bar.len])
 	command_bar.len = 0
+	command_bar.cursor = 0
 	command_bar.view_offset = 0
 	return s
 }
@@ -202,7 +273,7 @@ NodeHandleById :: proc(id : u32) -> mem.Handle {
 // 树的根 = parent_id 为 0 的节点(分裂 root 后根迁移到新父)
 WindowTreeRoot :: proc() -> mem.Handle {
 	for i in 1 ..< MAX_TREE_NODE_SLOTS {
-		if mem.Alive(&window_tree_nodes, i) && window_tree_nodes.data[i].parent_id.id == 0 {
+		if node := mem.GetIndex(&window_tree_nodes, i); node != nil && node.parent_id.id == 0 {
 			return mem.Handle { id = u32(i), generation = window_tree_nodes.generations[i] }
 		}
 	}
@@ -323,10 +394,10 @@ TreeNodeSetWindow :: proc(h : mem.Handle, win_h : mem.Handle) -> bool {
 	return true
 }
 
-// 取节点挂载的窗口;内部节点或空返回 nil
+// 取节点挂载的窗口;内部节点或空返回 nil(句柄有效性由 GenArray 判定)
 NodeWindow :: proc(h : mem.Handle) -> ^Window {
 	node := GetWindowTreeNode(h)
-	if node == nil || node.window_id.id == 0 {
+	if node == nil {
 		return nil
 	}
 	return GetWindow(node.window_id)
@@ -562,10 +633,16 @@ treeNodeSetSon :: proc(h, son_h : mem.Handle, is_left : bool) -> bool {
 		if son == nil {
 			return false
 		}
-		for p := node.parent_id; p.id != 0; p = window_tree_nodes.data[p.id].parent_id {
+		// 环检测:son 在 id 的祖先链上则挂载即成环;每步经句柄判有效
+		for p := node.parent_id; p.id != 0; {
 			if p == son_h {
-				return false // son 在 id 的祖先链上,挂上去即成环
+				return false
 			}
+			parent := GetWindowTreeNode(p)
+			if parent == nil {
+				break
+			}
+			p = parent.parent_id
 		}
 		if old := son.parent_id; old.id != 0 && old != h {
 			if op := GetWindowTreeNode(old); op != nil {
