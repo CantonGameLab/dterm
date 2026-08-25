@@ -417,6 +417,30 @@ NodeContentTransform :: proc(node_h : mem.Handle) -> Transform {
 	}
 }
 
+// 命中测试:包含点 (x, y)(窗口物理像素)的 leaf 节点;无命中返回 {}
+nodeAtPoint :: proc(x, y : f32) -> mem.Handle {
+	return nodeAtPointRec(WindowTreeRoot(), x, y)
+}
+
+nodeAtPointRec :: proc(h : mem.Handle, x, y : f32) -> mem.Handle {
+	node := GetWindowTreeNode(h)
+	if node == nil {
+		return {}
+	}
+	if node.is_leaf {
+		if x >= node.position_x && x < node.position_x + node.width &&
+			y >= node.position_y && y < node.position_y + node.height {
+			return h
+		}
+		return {}
+	}
+	// 矩形互不重叠,顺序无关;先右后左保持稳定偏好
+	if r := nodeAtPointRec(node.right_son_id, x, y); r.id != 0 {
+		return r
+	}
+	return nodeAtPointRec(node.left_son_id, x, y)
+}
+
 // ---------------------------------------------------------------------------
 // Iterm 数据操作(iterm 无独立 id,按窗口内下标定位;窗口自动创建)
 // ---------------------------------------------------------------------------

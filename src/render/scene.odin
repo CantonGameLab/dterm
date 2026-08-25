@@ -129,7 +129,7 @@ drawConsole :: proc(node_h : mem.Handle, theme : Theme) {
 	if tb == nil {
 		return
 	}
-	visible_top := max(0, len(tb.lines) - int(console.rows) - int(tb.scroll_offset))
+	visible_top, _ := cv.ConsoleViewportTop(win.console_id)
 
 	// 行连体 shaping 缓冲:按最大列宽一次性分配,逐行复用
 	shaped := make([dynamic]u16, int(console.cols))

@@ -308,6 +308,15 @@ trimScrollback :: proc(console_h : mem.Handle) {
 	remove_range(&tb.lines, 0, cut)
 	console.cursor_row -= u16(cut)
 	console.vt.scroll_top, console.vt.scroll_bottom = 0, console.rows - 1
+	// review 锚定行随裁剪平移;被裁掉的视口内容钳到顶(该历史段已丢弃)
+	if tb.review_line != 0 {
+		rl := max(0, int(tb.review_line) - 1 - cut)
+		if rl >= len(tb.lines) - 1 {
+			tb.review_line = 0 // 回到最新 = 普通
+		} else {
+			tb.review_line = u32(rl + 1)
+		}
+	}
 }
 
 vtPrint :: proc(console_h : mem.Handle, cp : rune) {
@@ -925,12 +934,12 @@ ansiCubeLevel :: proc(v : int) -> u32 {
 	return u32(v == 0 ? 0 : 55 + v * 40)
 }
 
-// 光标屏幕位置(0-based):物理行 - 可视区顶部(历史 + 用户滚动)
+// 光标屏幕位置(0-based):物理行 - 可视区顶部(历史 + review 滚动)
 cursorScreenPos :: proc(console : ^Console) -> (row, col : int) {
 	tb := GetTermBuffer(console.active_term_buffer_id)
 	top := 0
 	if tb != nil {
-		top = max(0, len(tb.lines) - int(console.rows) - int(tb.scroll_offset))
+		top = viewportTop(console, tb)
 	}
 	return int(console.cursor_row) - top, int(console.cursor_col)
 }

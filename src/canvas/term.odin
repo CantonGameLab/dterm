@@ -9,9 +9,9 @@ import "core:math"
 
 // 双层屏幕模型:
 //   内容层 TermBuffer:一"页"的所有行(含滚动历史)。
-//   视口层 Console:行列、光标、登记/激活的页、滚动偏移、VT 状态。
+//   视口层 Console:行列、光标、登记/激活的页、review 视口、VT 状态。
 //   Console 与 ConptyContext 通过 conpty_handle 绑定;函数间传递一律用 Handle,内部自查槽位。
-//   渲染契约:visible_top = max(0, len(lines) - rows - tb.scroll_offset) // scroll_offset 随 buffer
+//   渲染契约:visible_top = viewportTop(console, tb)  // 普通 = 贴底;review = 锚定 review_line
 //            屏幕第 r 行 ↔ lines[visible_top + r];光标屏幕位置 = cursor_row - visible_top
 //            第 r 行第 c 列格子左上角像素 = (origin_x + c*cell_w, origin_y + r*cell_h);cell 来自 font 度量
 
@@ -65,7 +65,11 @@ TRIM_SLACK :: 512 // 超上限这么多行才裁,避免频繁搬行
 
 TermBuffer :: struct {
 	lines : [dynamic]Line,
-	scroll_offset : u32,
+	// 历史视口(绝对锚定模型,唯一真值):
+	//   0        = 普通模式(实时跟随,底行 = 最新行,新输出自动贴底)
+	//   n (1..)  = review 模式,值 = 屏幕底行物理索引 + 1;新输出到达时不动,
+	//              视口内容稳定;滚回最新(n = len)转回普通(置 0)
+	review_line : u32,
 }
 
 term_buffers : mem.GenArray(MAX_TERM_BUFFER_SLOTS, TermBuffer)
@@ -252,14 +256,24 @@ ConsoleActivateTermBuffer :: proc(console_h, term_buffer_h : mem.Handle) -> bool
 	return false
 }
 
-// 改网格尺寸的副作用:cursor_col/滚动区下限 clamp + scroll_offset 锚定补偿。
-// 锚定规则(同 alacritty):贴底保持贴底,滚动中保持视口内容(visible_top)不动。
+// 视口顶行(物理索引):普通 = 贴底;review = 锚定 review_line(底行)上推 rows 行。
+// 渲染/光标应答/resize 共用一个公式,勿在别处重写。
+viewportTop :: proc(console : ^Console, tb : ^TermBuffer) -> int {
+	if tb.review_line == 0 {
+		return max(0, len(tb.lines) - int(console.rows))
+	}
+	top := int(tb.review_line) - 1 - (int(console.rows) - 1)
+	return max(0, top)
+}
+
+// 改网格尺寸的副作用:cursor_col/滚动区下限 clamp + review 视口锚定补偿。
+// 锚定规则(同 alacritty):普通(贴底)保持贴底;review 保持视口内容(顶行)不动。
 // 注意:cursor_row 是物理行索引(指向 lines,可 > rows),不能按屏幕行 clamp。
 applyConsoleSize :: proc(console : ^Console, rows, cols : u16) {
 	tb := GetTermBuffer(console.active_term_buffer_id)
 	visible_top_before := 0
 	if tb != nil {
-		visible_top_before = max(0, len(tb.lines) - int(console.rows) - int(tb.scroll_offset))
+		visible_top_before = viewportTop(console, tb)
 	}
 
 	console.rows, console.cols = rows, cols
@@ -267,11 +281,14 @@ applyConsoleSize :: proc(console : ^Console, rows, cols : u16) {
 	console.vt.scroll_bottom = rows - 1
 	console.vt.wrap_pending = false
 
-	// 滚动中:反推 scroll_offset 使 visible_top 不变(内容不被拽走)
-	if tb != nil && tb.scroll_offset != 0 {
-		max_scroll := max(0, len(tb.lines) - int(rows))
-		s := len(tb.lines) - int(rows) - visible_top_before
-		tb.scroll_offset = u32(max(0, min(s, max_scroll)))
+	// review 中:按"顶行不变"重定 review_line(底行随 rows 平移;内容不被拽走)
+	if tb != nil && tb.review_line != 0 {
+		nl := visible_top_before + int(rows) - 1 // 新底行索引
+		if nl >= len(tb.lines) - 1 {
+			tb.review_line = 0 // 到底 = 回到普通
+		} else {
+			tb.review_line = u32(nl + 1)
+		}
 	}
 }
 
@@ -356,18 +373,17 @@ ConsoleSetCursor :: proc(console_h : mem.Handle, row, col : u16) -> bool {
 	return true
 }
 
-ConsoleSetScrollOffset :: proc(console_h : mem.Handle, offset : u32) -> bool {
+// 历史视口查询(渲染/应答共用公式入口):返回顶行物理索引 + 是否在 review
+ConsoleViewportTop :: proc(console_h : mem.Handle) -> (top : int, in_review : bool) {
 	console := GetConsole(console_h)
 	if console == nil {
-		return false
+		return 0, false
 	}
 	tb := GetTermBuffer(console.active_term_buffer_id)
 	if tb == nil {
-		return false
+		return 0, false
 	}
-	max_offset := max(0, len(tb.lines) - int(console.rows))
-	tb.scroll_offset = min(u32(max_offset), offset)
-	return true
+	return viewportTop(console, tb), tb.review_line != 0
 }
 
 // ---------------------------------------------------------------------------

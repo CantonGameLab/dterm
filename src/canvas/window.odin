@@ -357,12 +357,15 @@ collectLeaves :: proc(h : mem.Handle, leaves : ^[MAX_TREE_NODE_SLOTS]mem.Handle,
 
 // 历史滚动,delta 单位 = 行:
 //   delta > 0 → 向下翻(看更新的内容);delta < 0 → 向上翻(看旧内容,进入 review)
-//   边界:向上翻到历史顶 clamp;向下滚到底(scroll_offset == 0)自动退出 review,
-//   回到普通模式(实时跟随,后续快捷键端点行为以 WT 模式为准)。
-// 数据模型(单真值):视口位置 = scroll_offset(TermBuffer,渲染已消费)。
-//   review 判定   = scroll_offset > 0
-//   review_line   = len(lines) - scroll_offset - 1(当前窗口底行的物理行索引,
-//                   推导值;与窗口树"leaf 几何 = 视口在内容上的锚点"同构,不另存)
+//   边界:向上翻到历史顶 clamp;向下滚到底(回到最新行)自动退出 review,
+//   回到普通模式(实时跟随)。
+// 数据模型(单真值):TermBuffer.review_line
+//   0              = 普通模式(实时跟随,底行 = 最新行)
+//   n (1..)        = review 模式,值 = 窗口底行物理索引 + 1;绝对锚定:
+//                    新输出到达时不动(视口内容稳定),trim 裁剪时平移补偿
+//   滚回最新       = review_line 置 0(与"底行索引+1 == len"等价,避免
+//                    "底行 = 0"与普通模式哨兵冲突)
+// 输入字节前的退出(键盘任意输入回到普通模式)由绑定层调 ConsoleExitReview。
 ConsoleScroll :: proc(delta : int, id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -380,10 +383,39 @@ ConsoleScroll :: proc(delta : int, id : mem.Handle = {}) -> bool {
 	if tb == nil {
 		return false
 	}
-	// 向下翻 = 视口下移 = offset 减小;负 delta(向上翻)则增大
-	off := int(tb.scroll_offset) - delta
-	// 上限由 ConsoleSetScrollOffset clamp(历史顶),下限 0 = 回到普通模式
-	return ConsoleSetScrollOffset(win.console_id, u32(max(0, off)))
+	cur := int(tb.review_line) - 1
+	if tb.review_line == 0 {
+		cur = len(tb.lines) - 1 // 普通模式起点 = 最新底行
+	}
+	nl := clamp(cur + delta, 0, len(tb.lines) - 1)
+	if nl >= len(tb.lines) - 1 {
+		tb.review_line = 0 // 滚回最新 = 普通模式
+	} else {
+		tb.review_line = u32(nl + 1)
+	}
+	return true
+}
+
+// 退出 review 回到普通模式(实时跟随)。键盘输入等"立即回到当前"动作的绑定目标。
+ConsoleExitReview :: proc(id : mem.Handle = {}) -> bool {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		return false
+	}
+	win := NodeWindow(node_h)
+	if win == nil {
+		return false
+	}
+	console := GetConsole(win.console_id)
+	if console == nil {
+		return false
+	}
+	tb := GetTermBuffer(console.active_term_buffer_id)
+	if tb == nil {
+		return false
+	}
+	tb.review_line = 0
+	return true
 }
 
 // ---------------------------------------------------------------------------

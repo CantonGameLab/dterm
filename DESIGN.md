@@ -178,6 +178,9 @@ count                  # 窗口数量
 | `LaunchConsole` | `(cmd : string, id = {}) -> bool` | 用窗口字体启动会话;默认 auto_close=true |
 | `FeedConsole` | `(data : []byte, id = {}) -> bool` | 写输入到窗口 console |
 | `SetAutoClose` | `(b : bool, id = {}) -> bool` | 设置自动关闭 |
+| `ClearWindowConsole` | `(id = {}) -> bool` | 清窗口会话(保留窗口/字体) |
+| `ConsoleScroll` | `(delta : int, id = {}) -> bool` | 历史滚动:正=向下翻(新内容),负=向上翻(旧内容,进入 review);滚回最新自动回普通模式 |
+| `ConsoleExitReview` | `(id = {}) -> bool` | 立即退出 review 回普通(实时跟随);键盘输入绑定目标 |
 | `PollSessions` | `() -> bool` | 每帧检测会话结束,按 auto_close 处理;返回是否有存活会话 |
 | `SetFocusWindow` | `(id : mem.Handle) -> bool` | 设焦点 |
 | `FocusMove` | `(dir : FocusDirection, id = {}) -> bool` | 方向导航设焦点 |
@@ -212,8 +215,15 @@ ConsoleUpdateTree(root_h)                          // 遍历树:布局 + Resize 
 UpdateConsole(h)                                   // 拉 conpty 环形缓冲喂解析器
 ConsoleFeed(h, data)                               // 注入字节(工具自绘 / 测试 / 指令回显)
 ConsoleSetCursor(h, row, col) -> bool
+ConsoleViewportTop(h) -> (top, in_review)          // 视口顶行(渲染/应答共用入口)
 ConsoleActiveTermBuffer(h) -> mem.Handle
 ```
+
+**历史滚动数据模型(单真值,绝对锚定)**:`TermBuffer.review_line`
+- `0` = 普通模式(实时跟随,底行 = 最新行,新输出自动贴底)
+- `n (1..)` = review 模式,值 = 屏幕底行物理索引 + 1;**新输出到达时不动**(视口内容稳定),trim 裁剪头行时平移补偿,resize 按"顶行不变"重排
+- 滚回最新(n 到达 len)→ 置 0(普通);与"底行 = 0"的哨兵冲突用 +1 编码避开
+- 视口顶行 = `viewportTop(console, tb)`(唯一公式,渲染/光标应答共用)
 
 ### 5.3 工具 iterm
 

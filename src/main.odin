@@ -38,9 +38,10 @@ main :: proc() {
 		if ev.Poll() {
 			break
 		}
-		// 会话轮询:各窗口 console 应用退出后按 auto_close 独立处理;
-		// 全部窗口销毁后程序退出。
-		update() // 先消费所有窗口输出(含刚退出的)
+
+		cv.ConsoleUpdateTree(cv.WindowTreeRoot())
+
+		cv.ProcessMouse() // 鼠标绑定:滚轮 review / 点击聚焦 / 应用鼠标模式(SGR)
 		if !cv.PollSessions() {
 			fmt.println("all sessions ended")
 			break
@@ -55,13 +56,14 @@ main :: proc() {
 			rd.EndFrame()
 			continue
 		}
-		// 本帧输入:控制台可见时进控制台,否则发给焦点 console
-		if buf := inp.TakeText(); len(buf) > 0 {
-			if cv.CommandBarVisible() {
+		// 本帧输入:控制台可见时进控制台,否则走绑定层
+		// (绑定层:快捷键动作优先;未消费序列+文本 = 文本输入,先退出 review 再送应用)
+		if cv.CommandBarVisible() {
+			if buf := inp.TakeAppInput(); len(buf) > 0 {
 				handleCmdBarInput(buf)
-			} else {
-				cv.FeedConsole(buf)
 			}
+		} else {
+			cv.ProcessKeys()
 		}
 		rd.BeginFrame()
 		rd.DrawFrame(theme)
@@ -266,5 +268,4 @@ setupConsole :: proc(win : mem.Handle, font_path : string, size : f32, cmd : str
 
 // 更新步:树遍历 + Console 布局/输出更新由 canvas 统一管理
 update :: proc() {
-	cv.ConsoleUpdateTree(cv.WindowTreeRoot())
 }

@@ -17,6 +17,8 @@ Poll :: proc() -> bool {
 			cv.WindowTreeSetRootSize(u32(e.window.data1), u32(e.window.data2))
 		case .KEY_DOWN, .KEY_UP, .TEXT_INPUT:
 			inp.Handle(&e)
+		case .MOUSE_MOTION, .MOUSE_BUTTON_DOWN, .MOUSE_BUTTON_UP, .MOUSE_WHEEL:
+			inp.Handle(&e) // 鼠标原始状态进 input 通道,绑定/编码由 canvas 层决策
 		}
 	}
 	return quit
