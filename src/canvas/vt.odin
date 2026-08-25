@@ -1,3 +1,5 @@
+// VT 语义层:VtState(字节序列的终端状态)+ 序列分派(ESC/CSI/SGR/DEC 模式)
+// 与应答(DSR/DA/DECRQM 写回 ConPTY)。操作 Console/TermBuffer 一律经句柄接口。
 package canvas
 
 import ct "../conpty"
@@ -7,7 +9,6 @@ import "core:fmt"
 
 // VT 解析:vtparse 状态机(字节流 → 动作回调),回调操作 Console。
 // 每帧 UpdateConsole(id) 拉取 ConPTY 输出喂给解析器;VtState 嵌在 Console.vt。
-
 VtState :: struct {
 	parser : vp.Parser, // 字节级状态机(切分序列)
 
@@ -132,7 +133,6 @@ unpackHandle :: proc(p : rawptr) -> mem.Handle {
 // ---------------------------------------------------------------------------
 // C0
 // ---------------------------------------------------------------------------
-
 // 光标列落在宽字符续列(cp=0 + wide)时,再向 dir 方向挪一列;越出网格则 clamp。
 // 注意:宽字符写不下最后一列会折行,故 cols-1 不会是续列;但 resize 缩窄后
 // cells 可能超出 cols,此处仍要保护。
@@ -199,50 +199,6 @@ vtLf :: proc(console_h : mem.Handle) {
 	vtScrollUp(console_h)
 }
 
-// 滚动区上移一行。全屏:行数组尾部增长,顶行滚进历史;
-// 局部:顶行丢弃,底行补空行。
-vtScrollUp :: proc(console_h : mem.Handle) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	top, bottom := int(console.vt.scroll_top), int(console.vt.scroll_bottom)
-	if top == 0 && bottom == int(console.rows) - 1 {
-		append(&tb.lines, Line{})
-		console.cursor_row += 1
-		trimScrollback(console_h)
-		return
-	}
-	for len(tb.lines) <= bottom {
-		append(&tb.lines, Line{})
-	}
-	delete(tb.lines[top].cells)
-	remove_range(&tb.lines, top, top + 1)
-	insertLine(&tb.lines, bottom)
-}
-
-vtScrollDown :: proc(console_h : mem.Handle) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	top, bottom := int(console.vt.scroll_top), int(console.vt.scroll_bottom)
-	for len(tb.lines) <= bottom {
-		append(&tb.lines, Line{})
-	}
-	delete(tb.lines[bottom].cells)
-	remove_range(&tb.lines, bottom, bottom + 1)
-	insertLine(&tb.lines, top)
-}
-
 // RI:光标上移一行;在滚动区顶则向下滚动
 vtReverseIndex :: proc(console_h : mem.Handle) {
 	console := GetConsole(console_h)
@@ -280,45 +236,6 @@ vtReset :: proc(console_h : mem.Handle) {
 	console.cursor_row, console.cursor_col = 0, 0
 }
 
-// core:slice 无 insert 的替代实现
-insertLine :: proc(lines : ^[dynamic]Line, index : int) {
-	append(lines, Line{})
-	copy(lines[index + 1:], lines[index:len(lines) - 1])
-	lines[index] = Line{}
-}
-
-// 只在全屏滚动路径调用;裁掉最老行
-trimScrollback :: proc(console_h : mem.Handle) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	max_lines := int(console.rows) + MAX_SCROLLBACK_LINES
-	if len(tb.lines) <= max_lines + TRIM_SLACK {
-		return
-	}
-	cut := len(tb.lines) - max_lines
-	for i in 0 ..< cut {
-		delete(tb.lines[i].cells)
-	}
-	remove_range(&tb.lines, 0, cut)
-	console.cursor_row -= u16(cut)
-	console.vt.scroll_top, console.vt.scroll_bottom = 0, console.rows - 1
-	// review 锚定行随裁剪平移;被裁掉的视口内容钳到顶(该历史段已丢弃)
-	if tb.review_line != 0 {
-		rl := max(0, int(tb.review_line) - 1 - cut)
-		if rl >= len(tb.lines) - 1 {
-			tb.review_line = 0 // 回到最新 = 普通
-		} else {
-			tb.review_line = u32(rl + 1)
-		}
-	}
-}
-
 vtPrint :: proc(console_h : mem.Handle, cp : rune) {
 	console := GetConsole(console_h)
 	if console == nil {
@@ -339,7 +256,6 @@ vtTargetRow :: proc(console : ^Console, p0 : int) -> int {
 // ---------------------------------------------------------------------------
 // CSI
 // ---------------------------------------------------------------------------
-
 vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 	console := GetConsole(console_h)
 	if console == nil {
@@ -622,235 +538,9 @@ vtAltScreen :: proc(console_h : mem.Handle, enter : bool) {
 	}
 }
 
-// 擦除用 cell:带当前 SGR 背景色。xterm 语义:EL/ED/ECH 擦除的区域
-// 用当前背景色填充(补全窗口等依赖此行为形成完整矩形背景)
-eraseCell :: proc(console : ^Console) -> Cell {
-	return Cell { style = { bg = console.vt.style.bg } }
-}
-
-// 行定宽化:确保 line.cells 覆盖到 col(行模型是定宽 cols,擦除/定位需要)。
-// 补的空白格必须是默认样式(零值 bg=0 会被渲染成黑色块)
-lineEnsureCol :: proc(line : ^Line, col : int) {
-	for len(line.cells) <= col {
-		append(&line.cells, Cell { style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR } })
-	}
-}
-
-// mode:0 到行尾 / 1 到行首 / 2 整行
-vtEraseInLine :: proc(console_h : mem.Handle, mode : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	row := int(console.cursor_row)
-	for len(tb.lines) <= row {
-		append(&tb.lines, Line{})
-	}
-	line := &tb.lines[row]
-	erase := eraseCell(console)
-	switch mode {
-	case 0:
-		for col in int(console.cursor_col) ..< int(console.cols) {
-			lineEnsureCol(line, col)
-			line.cells[col] = erase
-		}
-	case 1:
-		for col in 0 ..= int(console.cursor_col) {
-			lineEnsureCol(line, col)
-			line.cells[col] = erase
-		}
-	case 2:
-		for col in 0 ..< int(console.cols) {
-			lineEnsureCol(line, col)
-			line.cells[col] = erase
-		}
-	}
-}
-
-// mode:0 光标到屏尾 / 1 屏头到光标 / 2 可视区 / 3 全部 + 历史
-vtEraseInDisplay :: proc(console_h : mem.Handle, mode : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	switch mode {
-	case 0:
-		vtEraseInLine(console_h, 0)
-		for row in int(console.cursor_row) + 1 ..< len(tb.lines) {
-			vtClearLineAll(console_h, row)
-		}
-	case 1:
-		for row in 0 ..< int(console.cursor_row) {
-			vtClearLineAll(console_h, row)
-		}
-		vtEraseInLine(console_h, 1)
-	case 2:
-		start := max(0, len(tb.lines) - int(console.rows))
-		for row in start ..< len(tb.lines) {
-			vtClearLineAll(console_h, row)
-		}
-	case 3:
-		TermBufferClear(console.active_term_buffer_id)
-	}
-}
-
-vtClearLineAll :: proc(console_h : mem.Handle, row : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	if row < 0 || row >= len(tb.lines) {
-		return
-	}
-	erase := eraseCell(console)
-	for col in 0 ..< int(console.cols) {
-		lineEnsureCol(&tb.lines[row], col)
-		tb.lines[row].cells[col] = erase
-	}
-}
-
-// ECH:从光标起擦除 n 个字符(不清空行)
-vtEraseChars :: proc(console_h : mem.Handle, n : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	row := int(console.cursor_row)
-	if row >= len(tb.lines) {
-		return
-	}
-	line := &tb.lines[row]
-	start := int(console.cursor_col)
-	end := min(start + n, int(console.cols))
-	erase := eraseCell(console)
-	when VT_DEBUG {
-		fmt.eprintfln("VTDBG ECH n=%d start=%d style.bg=%08X", n, start, console.vt.style.bg)
-	}
-	for i in start ..< end {
-		lineEnsureCol(line, i)
-		line.cells[i] = erase
-	}
-}
-
-// DCH:删除光标起 n 字符,右侧左移补空白
-vtDeleteChars :: proc(console_h : mem.Handle, n : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	row := int(console.cursor_row)
-	if row >= len(tb.lines) {
-		return
-	}
-	line := &tb.lines[row]
-	col := int(console.cursor_col)
-	nn := min(n, len(line.cells) - col)
-	remove_range(&line.cells, col, col + nn)
-	erase := eraseCell(console)
-	for i in 0 ..< nn {
-		append(&line.cells, erase)
-	}
-}
-
-// ICH:光标处插入 n 空白字符,右侧挤出
-vtInsertChars :: proc(console_h : mem.Handle, n : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	row := int(console.cursor_row)
-	for len(tb.lines) <= row {
-		append(&tb.lines, Line{})
-	}
-	line := &tb.lines[row]
-	for len(line.cells) < int(console.cols) {
-		append(&line.cells, Cell { style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR } })
-	}
-	col := int(console.cursor_col)
-	nn := min(n, int(console.cols) - col)
-	copy(line.cells[col + nn:], line.cells[col:int(console.cols) - nn])
-	erase := eraseCell(console)
-	for i in col ..< col + nn {
-		line.cells[i] = erase
-	}
-}
-
-// IL:光标处插入 n 空行,滚动区底行被挤出
-vtInsertLines :: proc(console_h : mem.Handle, n : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	base := screenBase(console, tb)
-	row := int(console.cursor_row)
-	bottom := base + int(console.vt.scroll_bottom)
-	for i in 0 ..< n {
-		for len(tb.lines) <= bottom {
-			append(&tb.lines, Line{})
-		}
-		if bottom < len(tb.lines) {
-			delete(tb.lines[bottom].cells)
-			remove_range(&tb.lines, bottom, bottom + 1)
-		}
-		insertLine(&tb.lines, row)
-	}
-}
-
-// DL:删除光标处 n 行,滚动区底补空行
-vtDeleteLines :: proc(console_h : mem.Handle, n : int) {
-	console := GetConsole(console_h)
-	if console == nil {
-		return
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return
-	}
-	base := screenBase(console, tb)
-	row := int(console.cursor_row)
-	bottom := base + int(console.vt.scroll_bottom)
-	for i in 0 ..< n {
-		if row >= len(tb.lines) {
-			break
-		}
-		delete(tb.lines[row].cells)
-		remove_range(&tb.lines, row, row + 1)
-		insertLine(&tb.lines, bottom)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // SGR
 // ---------------------------------------------------------------------------
-
 // xterm 标准 16 色
 ANSI16 : [16]u32 = {
 	0x000000, 0x800000, 0x008000, 0x808000,
@@ -1047,3 +737,4 @@ vtQueryMode :: proc(console : ^Console, mode : int) -> int {
 ConsoleFeed :: proc(console_h : mem.Handle, data : []byte) {
 	vtFeed(console_h, data)
 }
+

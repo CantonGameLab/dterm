@@ -38,6 +38,21 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 - 指令入口与 DLL 插件**并存**:DLL 给编译代码的用户,指令给交互/子进程;两者都落在用户接口(5.0)上,经适配器翻译到模块接口。
 - **模块间通过数据交互,避免回调交叉**;回调只允许出现在"框架 → 使用方"边界(插件契约)。
 
+### 3.1 canvas 模块文件划分(一类数据 + 其操作 = 一个文件)
+
+| 文件 | 数据类型 | 职责 |
+|---|---|---|
+| `tree.odin` | `WindowTreeNode`/`Transform`/`SplitType`/`FocusDirection`/焦点状态 | 树结构操作(分裂/摘除/挂载/重算/焦点/命中)+ `ConsoleUpdateTree` 编排 |
+| `win.odin` | `Window` | 窗口表生命周期(Create/Get/DestroySlot/ensureWindow) |
+| `iterm.odin` | `Iterm`/`ToolType` | 工具浮层增删/锚定变换 |
+| `commandbar.odin` | `CommandBar` | 悬浮控制台显示/编辑(渲染在 render/uilayer) |
+| `buffer.odin` | `Cell`/`CellStyle`/`Line`/`TermBuffer` | 内容层生命周期 + **全部写路径**(落格/折行/滚动/擦除/裁剪)+ `review_line` 真值 |
+| `console.odin` | `Console` | 视口生命周期 + 布局(居中/`viewportTop`/review 锚定) |
+| `vt.odin` | `VtState` | VT 语法语义分派(ESC/CSI/SGR/DEC 模式)+ 应答 |
+| `userapi.odin` | — | 用户接口函数族(id 省略 = 焦点) |
+| `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数 |
+| `keysbinding.odin` | — | 输入绑定(键表/鼠标/SGR 编码) |
+
 ## 4. 程序状态(数据结构设计)
 
 ### 4.1 窗口树节点

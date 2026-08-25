@@ -46,10 +46,14 @@ TreeUnits := []string{
 	"WindowTreeSetRootSize", "RecalculateTransforms",
 	"ConsoleUpdateTree", "firstLeaf", "collectLeaves", "countLeaves",
 	"MAX_WINDOW_SLOTS", "DEFAULT_FRAME_COLOR",
+	"MAX_TREE_NODE_SLOTS", "ROOT_WINDOW_TREE_NODE_ID",
+	"window_tree_nodes", "focused_node",
+	"Window_Width", "Window_Height", "DEFAULT_FRAME_WIDTH",
 }
 
 WinUnits := []string{
 	"Window", "CreateWindow", "GetWindow", "DestroyWindowSlot", "ensureWindow",
+	"windows",
 }
 
 ItermUnits := []string{
@@ -64,6 +68,7 @@ CmdbarUnits := []string{
 	"CommandBarBackspace", "CommandBarDelete", "CommandBarCursorMove",
 	"CommandBarHome", "CommandBarEnd", "CommandBarWordMove",
 	"CommandBarTake", "GetCommandBar",
+	"MAX_CMD_INPUT", "command_bar",
 }
 
 BufferUnits := []string{
@@ -76,6 +81,7 @@ BufferUnits := []string{
 	"vtEraseInLine", "vtEraseInDisplay", "vtClearLineAll", "vtEraseChars",
 	"vtDeleteChars", "vtInsertChars", "vtInsertLines", "vtDeleteLines",
 	"DEFAULT_COLOR", "MAX_TERM_BUFFER_SLOTS", "MAX_SCROLLBACK_LINES", "TRIM_SLACK",
+	"term_buffers",
 }
 
 ConsoleUnits := []string{
@@ -85,6 +91,7 @@ ConsoleUnits := []string{
 	"viewportTop", "applyConsoleSize", "ConsoleSetSize", "ConsoleUpdateLayout",
 	"ConsoleSetCursor", "ConsoleViewportTop", "screenBase",
 	"MAX_CONSOLE_SLOTS", "MAX_BUFFERS_PER_CONSOLE",
+	"consoles",
 }
 
 VtUnits := []string{
@@ -97,7 +104,7 @@ VtUnits := []string{
 	"cursorScreenPos",
 	"vtReplyCursor", "vtReplyCursorDec", "vtReplyWindowSize", "vtReplyOk",
 	"vtReplyDa1", "vtReplyDa2", "vtReplyDecrqm", "vtQueryMode",
-	"ConsoleFeed", "ANSI16",
+	"ConsoleFeed", "ANSI16", "vtDbg",
 }
 
 UserapiUnits := []string{
@@ -157,6 +164,16 @@ import "core:fmt"`,
 TargetOrder := []string{
 	"tree.odin", "win.odin", "iterm.odin", "commandbar.odin",
 	"buffer.odin", "console.odin", "vt.odin", "userapi.odin",
+}
+
+// 桶索引与 TargetOrder 对应(map 值不可寻址,append 到 map 值会操作临时副本)
+bucketIndex :: proc(name : string) -> int {
+	for i in 0 ..< len(TargetOrder) {
+		if TargetOrder[i] == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // ---------------------------------------------------------------------------
@@ -414,14 +431,24 @@ main :: proc() {
 	if len(os.args) > 1 {
 		mode = os.args[1]
 	}
+	if mode == "verify" {
+		verify()
+		return
+	}
 
-	// 切分全部源文件
+	// 切分源文件(dump/apply = 旧 4 文件;after = 迁移后 8 文件)
 	all_units := make([dynamic]Unit)
 	defer delete(all_units)
 	import_map := make(map[string]string)
 	defer delete(import_map)
 	warnings := 0
-	for f in SOURCE_FILES {
+	files_to_scan : []string
+	if mode == "after" {
+		files_to_scan = TargetOrder
+	} else {
+		files_to_scan = SOURCE_FILES[:]
+	}
+	for f in files_to_scan {
 		path := strings.concatenate({SRC_DIR, "/", f})
 		units, imports, warns := splitFile(path)
 		if len(warns) > 0 {
@@ -472,6 +499,15 @@ export :: proc(path : string, units : []Unit) {
 verify :: proc() {
 	before := loadManifest("decls_before.txt")
 	after := loadManifest("decls_after.txt")
+	fmt.printf("DIAG: before=%d after=%d\n", len(before), len(after))
+	for k, v in before {
+		fmt.printf("DIAG-B: %q / %s\n", k, v[0:8])
+		break
+	}
+	for k, v in after {
+		fmt.printf("DIAG-A: %q / %s\n", k, v[0:8])
+		break
+	}
 	bad := 0
 	// 名字集合一致
 	if len(before) != len(after) {
@@ -511,7 +547,8 @@ loadManifest :: proc(path : string) -> map[string]string {
 	for line in strings.split_lines(string(data)) {
 		parts := strings.split(line, "\t")
 		if len(parts) == 3 {
-			m[parts[0]] = parts[2]
+			// split 的返回是零拷贝切片(引用 data),data 释放后悬垂 → 克隆
+			m[strings.clone(parts[0])] = strings.clone(parts[2])
 		}
 	}
 	return m
@@ -527,40 +564,44 @@ apply :: proc(units : []Unit) {
 		}
 	}
 
-	// name → 目标文件
-	target_of := make(map[string]string)
+	// name → 桶下标
+	target_of := make(map[string]int)
 	defer delete(target_of)
 	for n in TreeUnits {
-		target_of[n] = "tree.odin"
+		target_of[n] = bucketIndex("tree.odin")
 	}
 	for n in WinUnits {
-		target_of[n] = "win.odin"
+		target_of[n] = bucketIndex("win.odin")
 	}
 	for n in ItermUnits {
-		target_of[n] = "iterm.odin"
+		target_of[n] = bucketIndex("iterm.odin")
 	}
 	for n in CmdbarUnits {
-		target_of[n] = "commandbar.odin"
+		target_of[n] = bucketIndex("commandbar.odin")
 	}
 	for n in BufferUnits {
-		target_of[n] = "buffer.odin"
+		target_of[n] = bucketIndex("buffer.odin")
 	}
 	for n in ConsoleUnits {
-		target_of[n] = "console.odin"
+		target_of[n] = bucketIndex("console.odin")
 	}
 	for n in VtUnits {
-		target_of[n] = "vt.odin"
+		target_of[n] = bucketIndex("vt.odin")
 	}
 	for n in UserapiUnits {
-		target_of[n] = "userapi.odin"
+		target_of[n] = bucketIndex("userapi.odin")
 	}
 
-	files := make(map[string][dynamic]Unit)
-	defer delete(files)
+	buckets : [8][dynamic]Unit
+	defer {
+		for i in 0 ..< 8 {
+			delete(buckets[i])
+		}
+	}
 	unmapped := 0
 	for u in units {
-		if t, ok := target_of[u.name]; ok {
-			append(&files[t], u)
+		if idx, ok := target_of[u.name]; ok {
+			append(&buckets[idx], u)
 		} else {
 			fmt.printf("UNMAPPED: %s (from %s)\n", u.name, u.file)
 			unmapped += 1
@@ -571,22 +612,23 @@ apply :: proc(units : []Unit) {
 		fmt.eprintln("ABORT: unmapped units > 0")
 		return
 	}
-	for target in TargetOrder {
-		if len(files[target]) == 0 {
-			fmt.eprintln("ABORT: target empty:", target)
+	for i in 0 ..< 8 {
+		if len(buckets[i]) == 0 {
+			fmt.eprintln("ABORT: target empty:", TargetOrder[i])
 			return
 		}
 	}
 
 	// 先写全部新文件(全部成功后才删旧源)
-	for target in TargetOrder {
-		list := files[target]
+	for i in 0 ..< 8 {
+		target := TargetOrder[i]
+		list := buckets[i]
 		sb := strings.Builder{}
 		strings.write_string(&sb, FileHead[target])
 		strings.write_string(&sb, "\npackage canvas\n\n")
 		strings.write_string(&sb, FileImports[target])
 		strings.write_string(&sb, "\n\n")
-		for u in list {
+		for &u in list {
 			strings.write_string(&sb, u.text)
 			strings.write_string(&sb, "\n\n")
 		}
