@@ -518,6 +518,15 @@ loadManifest :: proc(path : string) -> map[string]string {
 }
 
 apply :: proc(units : []Unit) {
+	// 安全前置:源文件必须齐全(唯一一次运行,不做增量)
+	for f in SOURCE_FILES {
+		p := strings.concatenate({SRC_DIR, "/", f})
+		if !os.exists(p) {
+			fmt.eprintln("ABORT: source missing:", p)
+			return
+		}
+	}
+
 	// name → 目标文件
 	target_of := make(map[string]string)
 	defer delete(target_of)
@@ -557,8 +566,19 @@ apply :: proc(units : []Unit) {
 			unmapped += 1
 		}
 	}
-	fmt.printf("unmapped: %d\n", unmapped)
+	// 安全前置:未映射或目标为空,一律拒绝
+	if unmapped > 0 {
+		fmt.eprintln("ABORT: unmapped units > 0")
+		return
+	}
+	for target in TargetOrder {
+		if len(files[target]) == 0 {
+			fmt.eprintln("ABORT: target empty:", target)
+			return
+		}
+	}
 
+	// 先写全部新文件(全部成功后才删旧源)
 	for target in TargetOrder {
 		list := files[target]
 		sb := strings.Builder{}
