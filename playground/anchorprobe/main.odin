@@ -1,4 +1,4 @@
-﻿// 验证 iterm 锚定变换:双系数坐标对齐规则
+// 验证 iterm 锚定变换:双系数坐标对齐规则
 //   iterm_pos = window_pos + window_size*window_coord - iterm_size*iterm_coord
 package main
 

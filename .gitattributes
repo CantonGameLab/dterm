@@ -1,0 +1,4 @@
+﻿* text=auto
+*.odin text eol=lf
+*.md text eol=lf
+*.txt text eol=lf

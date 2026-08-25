@@ -1,4 +1,4 @@
-﻿// parser 单元测试:验证各命令字符串解析结果(字段正确性)。
+// parser 单元测试:验证各命令字符串解析结果(字段正确性)。
 package main
 
 import cv "../../src/canvas"
