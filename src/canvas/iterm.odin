@@ -19,6 +19,7 @@ ToolType :: enum u8 {
 //   window_pos + window_size*window_coord == iterm_pos + iterm_size*iterm_coord
 // 即 iterm_pos = window_pos + window_size*window_coord - iterm_size*iterm_coord。
 // 例:双锚点 (0,0) = 左上角贴 window 左上角;(0.5,0.5) = 中心对齐。
+// 工具私有数据 = fat struct:各类型状态直接内联(using 提升),无独立状态池。
 Iterm :: struct {
 	tool_type : ToolType,
 	console_id : mem.Handle, // 工具渲染目标(内部 console,conpty_handle = 0);0 = 空
@@ -29,6 +30,9 @@ Iterm :: struct {
 
 	iterm_ax, iterm_ay : f32, // iterm 自身系数坐标(锚点,0..1)
 	window_ax, window_ay : f32, // window 系数坐标(锚点,0..1)
+
+	// 按 tool_type 判别取用;using 使状态字段直接提升到 iterm 层
+	using commandbar : CommandBar,
 }
 
 // ---------------------------------------------------------------------------

@@ -1,13 +1,13 @@
-// 悬浮控制台数据:按窗口索引的编辑状态池(输入缓冲/光标/视图偏移)。
-// 作为 iterm 工具(ToolType.CommandBar)挂载:条目(几何/显隐)在窗口 iterms 数组,
-// 编辑状态在本池按窗口 id 索引;两者由窗口 id 关联。
-// 显示/隐藏 = ToggleCommandBar(切换条目 visible);每窗独立,切焦点各自保留。
-// 渲染在 render/uilayer(scene 按焦点窗口 iterm 几何绘制),输入状态机在 main。
+// 悬浮控制台数据:CommandBar 编辑状态(输入缓冲/光标/视图偏移)。
+// 作为 iterm 工具(ToolType.CommandBar)内联在窗口的 iterms 条目里(fat struct,
+// Iterm 里 using commandbar : CommandBar 提升字段),显隐 = 条目 visible。
+// 每窗独立,切焦点各自保留;渲染在 render/uilayer(scene 按 iterm 锚定几何绘制),
+// 输入状态机在 main。
 package canvas
 
 import mem "../memory"
 
-// 编辑状态;按窗口 id 索引(槽 0 保留),窗口销毁时由 DestroyWindowSlot 清槽
+// 编辑状态;归属 Iterm 条目(经 using 提升为 iterm 字段)
 MAX_CMD_INPUT :: 512
 
 CommandBar :: struct {
@@ -16,8 +16,6 @@ CommandBar :: struct {
 	cursor : int, // 光标位置(字节,0..len;插入点)
 	view_offset : int, // 横向滚动视口起点(字节),跟随光标
 }
-
-command_bars : [MAX_WINDOW_SLOTS]CommandBar
 
 // 窗口的 .CommandBar iterm 下标;无则 -1
 commandBarItermIndex :: proc(win : ^Window) -> int {
@@ -29,8 +27,8 @@ commandBarItermIndex :: proc(win : ^Window) -> int {
 	return -1
 }
 
-// 切换 id(或焦点)window 的悬浮控制台:首开建 iterm 条目(锚右上角)
-// 并清空编辑状态;再开是切换显隐(打开时同样清空)。
+// 切换 id(或焦点)window 的悬浮控制台:首开建 iterm 条目(锚右上角,状态零值);
+// 再开切换显隐(打开时清空编辑状态)。
 ToggleCommandBar :: proc(id : mem.Handle = {}) {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -40,27 +38,28 @@ ToggleCommandBar :: proc(id : mem.Handle = {}) {
 	if win == nil {
 		return
 	}
-	if bar := GetCommandBar(node_h); bar != nil {
-		clearBar(bar)
-	}
-	idx := commandBarItermIndex(win)
-	if idx < 0 {
-		node := GetWindowTreeNode(node_h)
-		if node == nil {
-			return
+	if idx := commandBarItermIndex(win); idx >= 0 {
+		it := &win.iterms[idx]
+		it.visible = !it.visible
+		if it.visible {
+			clearBar(&it.commandbar)
 		}
-		append(&win.iterms, Iterm {
-			tool_type = .CommandBar,
-			layer = 100,
-			visible = true,
-			width = node.width * 0.72,
-			height = 40, // 与 uilayer 的 bar_h 一致
-			window_ax = 1.0, window_ay = 0.0, // 锚窗口右上角
-			iterm_ax = 1.0, iterm_ay = 0.0,
-		})
 		return
 	}
-	win.iterms[idx].visible = !win.iterms[idx].visible
+	// 首开:条目状态即零值,无需清零
+	node := GetWindowTreeNode(node_h)
+	if node == nil {
+		return
+	}
+	append(&win.iterms, Iterm {
+		tool_type = .CommandBar,
+		layer = 100,
+		visible = true,
+		width = node.width * 0.72,
+		height = 40, // 与 uilayer 的 bar_h 一致
+		window_ax = 1.0, window_ay = 0.0, // 锚窗口右上角
+		iterm_ax = 1.0, iterm_ay = 0.0,
+	})
 }
 
 CommandBarVisible :: proc(id : mem.Handle = {}) -> bool {
@@ -76,7 +75,7 @@ CommandBarVisible :: proc(id : mem.Handle = {}) -> bool {
 	return idx >= 0 && win.iterms[idx].visible
 }
 
-// 取 id(或焦点)window 的编辑状态;窗口无效返回 nil
+// 取 id(或焦点)window 的 CommandBar 条目状态;无条目返回 nil
 GetCommandBar :: proc(id : mem.Handle = {}) -> ^CommandBar {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -86,11 +85,11 @@ GetCommandBar :: proc(id : mem.Handle = {}) -> ^CommandBar {
 	if win == nil {
 		return nil
 	}
-	node := GetWindowTreeNode(node_h) // 窗口句柄经节点取(id 是句柄,不在 Window 结构上)
-	if node == nil || node.window_id.id == 0 || node.window_id.id >= MAX_WINDOW_SLOTS {
+	idx := commandBarItermIndex(win)
+	if idx < 0 {
 		return nil
 	}
-	return &command_bars[node.window_id.id]
+	return &win.iterms[idx].commandbar
 }
 
 clearBar :: proc(bar : ^CommandBar) {
