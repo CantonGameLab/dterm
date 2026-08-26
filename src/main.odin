@@ -182,13 +182,15 @@ cmdBarKey :: proc(b : u8) {
 }
 
 // 取走控制台输入并执行。
-// 成功:关闭控制台;失败:保持打开 + 回显错误,便于修正
+// 成功:关闭控制台;失败:保持打开 + 回显错误,便于修正。
+// 注意:关闭目标 = 执行前的窗口(destroy 等命令会迁移焦点/删窗,不能按执行后的焦点)
 execCmdBar :: proc() {
+	win_before := cv.GetFocusWindow()
 	cmd := cv.CommandBarTake()
 	if len(cmd) > 0 {
 		// 控制台是专用命令框,无 ':' 前缀
 		if cv.ExecuteCommandString(cmd) {
-			cv.ToggleCommandBar() // 成功:关闭
+			cv.ToggleCommandBar(win_before) // 关闭原窗口的条;窗口已销毁则 no-op
 		} else {
 			// 失败:回显错误提示,控制台保持打开
 			fmt.eprintln("CMD FAILED:", cmd)
@@ -196,7 +198,7 @@ execCmdBar :: proc() {
 			cv.CommandBarInsert(transmute([]u8)err)
 		}
 	} else {
-		cv.ToggleCommandBar()
+		cv.ToggleCommandBar(win_before)
 	}
 }
 

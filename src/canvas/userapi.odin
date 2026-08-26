@@ -287,7 +287,8 @@ SetAutoClose :: proc(auto_close : bool, id : mem.Handle = {}) -> bool {
 // ---------------------------------------------------------------------------
 // 检测各 leaf 窗口的 console 会话是否结束(进程树归零或读管道断开);
 // 结束后按该窗口 auto_close 决定:true → 销毁窗口,false → 保留窗口(画面冻结)。
-// 返回 true = 仍有存活会话(主循环继续);false = 无任何存活会话(程序可退出)。
+// 返回 true = 仍有窗口(主循环继续);false = 所有窗口已关闭(程序可退出)。
+// 语义:会话结束按 auto_close 销毁窗口;窗口(哪怕空窗)还在就继续运行。
 PollSessions :: proc() -> bool {
 	alive := false
 	// 先收集所有 leaf(遍历中不修改树,避免指针失效)
@@ -300,6 +301,7 @@ PollSessions :: proc() -> bool {
 		if win == nil {
 			continue // 无窗口
 		}
+		alive = true // 窗口还在 = 程序继续(会话可有可无)
 		console := GetConsole(win.console_id)
 		if console == nil {
 			continue // 空窗口/悬挂引用,无会话
@@ -314,7 +316,7 @@ PollSessions :: proc() -> bool {
 				DestroyWindow(node_h)
 			}
 		} else {
-			alive = true // 仍有存活会话
+			// 存活会话(渲染照常)
 		}
 	}
 	return alive

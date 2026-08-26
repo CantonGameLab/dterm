@@ -369,14 +369,25 @@ treeNodePromote :: proc(parent_h, son_h : mem.Handle) {
 			gp.right_son_id = son_h
 		}
 	}
-	mem.Free(&window_tree_nodes, parent_h)
 	if gpid.id != 0 {
+		mem.Free(&window_tree_nodes, parent_h)
 		RecalculateTransforms(gpid)
-	} else {
-		// gpid == 0:son 成为新根,几何已继承 parent;但须重算子节点
-		// 布局(左/右子宽仍是旧的一半,不会自动变全宽)
-		RecalculateTransforms(son_h)
+		return
 	}
+	// parent 是根(无父):根壳常驻,直接吸收 son(后续分裂/删除依赖稳定的根槽;
+	// 释放根会让其 id 进空闲池,被复用成"第二个根")
+	p.is_leaf = son.is_leaf
+	p.window_id = son.window_id
+	p.left_son_id = son.left_son_id
+	p.right_son_id = son.right_son_id
+	if sl := GetWindowTreeNode(p.left_son_id); sl != nil {
+		sl.parent_id = parent_h
+	}
+	if sr := GetWindowTreeNode(p.right_son_id); sr != nil {
+		sr.parent_id = parent_h
+	}
+	mem.Free(&window_tree_nodes, son_h)
+	RecalculateTransforms(parent_h)
 }
 
 TreeNodeSetSplitFactor :: proc(h : mem.Handle, factor : f32) -> bool {
