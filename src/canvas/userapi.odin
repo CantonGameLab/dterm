@@ -55,27 +55,33 @@ DestroyWindow :: proc(id : mem.Handle = {}) -> bool {
 		// 字体不销毁:全局共享(同 path+size 复用,其他窗口可能仍引用)
 		DestroyWindowSlot(win_h)
 	}
-	// 焦点落在被删窗:移到兄弟(顶替父位);兄弟内部节点则取最左 leaf
-	if GetFocus() == node_h {
-		brother := mem.Handle {}
-		if parent := GetWindowTreeNode(node.parent_id); parent != nil {
-			brother = parent.left_son_id == node_h ? parent.right_son_id : parent.left_son_id
-		}
-		if brother.id == 0 {
-			brother = WindowTreeRoot()
-		}
-		if b := GetWindowTreeNode(brother); b != nil && !b.is_leaf {
-			brother = firstLeaf(brother)
-		}
-		SetFocus(brother)
-	}
 	// 唯一剩余窗口(根):清空整个树
 	if node_h == WindowTreeRoot() {
 		ResetWindowTree()
 		SetFocus({})
 		return true
 	}
+	// 候选兄弟:先记录再摘树(摘除时的提升/吸收可能释放兄弟槽)
+	brother := mem.Handle {}
+	if parent := GetWindowTreeNode(node.parent_id); parent != nil {
+		brother = parent.left_son_id == node_h ? parent.right_son_id : parent.left_son_id
+	}
 	TreeNodeRemove(node_h)
+	// 焦点落在被删窗:摘树后定焦点。兄弟被释放/变内部 → 回落根(根壳常驻)
+	if GetFocus() == node_h {
+		b := GetWindowTreeNode(brother)
+		if brother.id == 0 || b == nil || !b.is_leaf {
+			brother = WindowTreeRoot()
+		}
+		if brother.id == 0 {
+			SetFocus({})
+			return true
+		}
+		if b := GetWindowTreeNode(brother); b != nil && !b.is_leaf {
+			brother = firstLeaf(brother)
+		}
+		SetFocus(brother)
+	}
 	return true
 }
 

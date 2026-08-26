@@ -77,15 +77,15 @@ ProcessKeys :: proc() {
 		case .PAGEDOWN:
 			ConsoleScroll(rows) // 下翻一屏(滚到底自动回普通)
 			bound = true
+		case .F2:
+			ToggleCommandBar() // 悬浮控制台切换(user API;序列不进应用)
+			bound = true
 		}
 		if bound {
 			ev.consumed = true // 动作已执行,序列不再进应用
 		}
 	}
-	// 未消费键序列 + 文本 → 应用
-	if buf := inp.TakeAppInput(); len(buf) > 0 {
-		InputText(buf)
-	}
+	// 输入路由由 main 决定:bar 可见 → CommandBar 编辑状态机;否则 TakeAppInput → InputText
 }
 
 // 焦点窗口的 console(绑定动作的目标)

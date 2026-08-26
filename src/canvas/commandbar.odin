@@ -28,15 +28,15 @@ commandBarItermIndex :: proc(win : ^Window) -> int {
 }
 
 // 切换 id(或焦点)window 的悬浮控制台:首开建 iterm 条目(锚右上角,状态零值);
-// 再开切换显隐(打开时清空编辑状态)。
-ToggleCommandBar :: proc(id : mem.Handle = {}) {
+// 再开切换显隐(打开时清空编辑状态)。返回 true = 窗口有效(已创建/已切换)。
+ToggleCommandBar :: proc(id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
-		return
+		return false
 	}
 	win := NodeWindow(node_h)
 	if win == nil {
-		return
+		return false
 	}
 	if idx := commandBarItermIndex(win); idx >= 0 {
 		it := &win.iterms[idx]
@@ -44,12 +44,12 @@ ToggleCommandBar :: proc(id : mem.Handle = {}) {
 		if it.visible {
 			clearBar(&it.commandbar)
 		}
-		return
+		return true
 	}
 	// 首开:条目状态即零值,无需清零
 	node := GetWindowTreeNode(node_h)
 	if node == nil {
-		return
+		return false
 	}
 	append(&win.iterms, Iterm {
 		tool_type = .CommandBar,
@@ -60,6 +60,7 @@ ToggleCommandBar :: proc(id : mem.Handle = {}) {
 		window_ax = 1.0, window_ay = 0.0, // 锚窗口右上角
 		iterm_ax = 1.0, iterm_ay = 0.0,
 	})
+	return true
 }
 
 CommandBarVisible :: proc(id : mem.Handle = {}) -> bool {

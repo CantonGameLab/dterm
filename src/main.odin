@@ -46,24 +46,17 @@ main :: proc() {
 			fmt.println("all sessions ended")
 			break
 		}
-		// F2:切换悬浮控制台。触发时清空本帧输入缓冲(丢弃 F2 自身的转义序列),
-		// 并跳过本帧输入,避免把功能键当文本喂进控制台。
-		if inp.Keys.pressed[int(s3.Scancode.F2)] {
-			cv.ToggleCommandBar()
-			inp.ClearText()
-			rd.BeginFrame()
-			rd.DrawFrame(theme)
-			rd.EndFrame()
-			continue
-		}
-		// 本帧输入:控制台可见时进控制台,否则走绑定层
-		// (绑定层:快捷键动作优先;未消费序列+文本 = 文本输入,先退出 review 再送应用)
+		// 输入路由:绑定动作先消费(F2/翻页等);剩余输入按 modal 分发:
+		//   bar 可见 → CommandBar 编辑状态机;否则 → 应用(文本语义)
+		cv.ProcessKeys()
 		if cv.CommandBarVisible() {
 			if buf := inp.TakeAppInput(); len(buf) > 0 {
 				handleCmdBarInput(buf)
 			}
 		} else {
-			cv.ProcessKeys()
+			if buf := inp.TakeAppInput(); len(buf) > 0 {
+				cv.InputText(buf)
+			}
 		}
 		rd.BeginFrame()
 		rd.DrawFrame(theme)
