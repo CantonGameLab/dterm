@@ -11,6 +11,7 @@ ToolType :: enum u8 {
 	Preview,   // 预览面板
 	StatusBar, // 状态栏
 	Terminal,  // 备用终端面板
+	CommandBar, // 悬浮控制台(F2 切换;编辑状态池按窗口索引,可见性 = iterm.visible)
 }
 
 // 工具 iterm 锚定:大小是绝对像素,位置由双锚点决定。
@@ -22,6 +23,7 @@ Iterm :: struct {
 	tool_type : ToolType,
 	console_id : mem.Handle, // 工具渲染目标(内部 console,conpty_handle = 0);0 = 空
 	layer : u16, // 绘制顺序层(小 = 先画,被上层覆盖)
+	visible : bool, // 工具显隐(F2 切换 CommandBar 等)
 
 	width, height : f32, // 绝对大小(px)
 
@@ -37,7 +39,7 @@ TreeNodeAddIterm :: proc(h : mem.Handle, tool_type : ToolType) -> (index : int, 
 	if win == nil {
 		return 0, false
 	}
-	append(&win.iterms, Iterm { tool_type = tool_type })
+	append(&win.iterms, Iterm { tool_type = tool_type, visible = true })
 	return len(win.iterms) - 1, true
 }
 

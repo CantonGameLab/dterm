@@ -45,7 +45,7 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 | `tree.odin` | `WindowTreeNode`/`Transform`/`SplitType`/`FocusDirection`/焦点状态 | 树结构操作(分裂/摘除/挂载/重算/焦点/命中)+ `ConsoleUpdateTree` 编排 |
 | `win.odin` | `Window` | 窗口表生命周期(Create/Get/DestroySlot/ensureWindow) |
 | `iterm.odin` | `Iterm`/`ToolType` | 工具浮层增删/锚定变换 |
-| `commandbar.odin` | `CommandBar` | 悬浮控制台显示/编辑(渲染在 render/uilayer) |
+| `commandbar.odin` | `CommandBar`(编辑状态池) | 悬浮控制台:iterm 工具(`ToolType.CommandBar`)的编辑状态,按窗口 id 索引;条目/显隐在窗口 iterms,渲染按 iterm 锚定几何 |
 | `buffer.odin` | `Cell`/`CellStyle`/`Line`/`TermBuffer` | 内容层生命周期 + **全部写路径**(落格/折行/滚动/擦除/裁剪)+ `review_line` 真值 |
 | `console.odin` | `Console` | 视口生命周期 + 布局(居中/`viewportTop`/review 锚定) |
 | `vt.odin` | `VtState` | VT 语法语义分派(ESC/CSI/SGR/DEC 模式)+ 应答 |

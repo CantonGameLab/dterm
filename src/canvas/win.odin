@@ -31,6 +31,10 @@ DestroyWindowSlot :: proc(h : mem.Handle) {
 		return
 	}
 	delete(win.iterms)
+	// 清本窗口的悬浮控制台编辑状态(槽复用防脏数据)
+	if h.id < MAX_WINDOW_SLOTS {
+		command_bars[h.id] = {}
+	}
 	mem.Free(&windows, h)
 }
 

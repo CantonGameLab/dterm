@@ -27,23 +27,38 @@ DrawFrame :: proc(theme : Theme) {
 	}
 }
 
-// 悬浮控制台:nanovg 抗锯齿圆角长条,锚定焦点 window 右上角。
+// 悬浮控制台:遍历焦点窗口的 iterm 工具层,取 .CommandBar 可见条目
+// 按 iterm 锚定几何绘制(nanovg 抗锯齿圆角长条)。
 drawCommandBar :: proc(theme : Theme) {
 	focus := cv.GetFocus()
 	if focus.id == 0 {
 		return
 	}
-	node := cv.GetWindowTreeNode(focus)
-	if node == nil {
+	win := cv.NodeWindow(focus)
+	if win == nil {
 		return
 	}
-	bar := cv.GetCommandBar()
+	index := -1
+	for i in 0 ..< len(win.iterms) {
+		if win.iterms[i].tool_type == cv.ToolType.CommandBar && win.iterms[i].visible {
+			index = i
+			break
+		}
+	}
+	if index < 0 {
+		return
+	}
+	t := cv.ItermAbsoluteTransform(focus, index)
+	bar := cv.GetCommandBar(focus)
+	if bar == nil {
+		return
+	}
 	text := string(bar.input[:bar.len])
 	// 控制台配色:不透明、与终端深底明显区分。
 	// 背景 = 终端 fg(浅),文字 = 终端 bg(深)—— 高对比反色,悬浮清晰。
 	bar_fg := theme.fg
 	bar_text := theme.bg
-	UiDrawCommandBar(node.position_x, node.position_y, node.width, node.height,
+	UiDrawCommandBar(t.position_x, t.position_y, t.width, t.height,
 		text, bar.cursor, bar_fg, bar_text, 1.0)
 }
 

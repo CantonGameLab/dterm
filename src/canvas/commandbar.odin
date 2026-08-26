@@ -1,133 +1,205 @@
-// 悬浮控制台数据:CommandBar(可见性 + 输入缓冲 + 编辑光标 + 视图偏移)。
-// 编辑操作(插入/删除/移动/取走);渲染在 render/uilayer,输入状态机在 main。
+// 悬浮控制台数据:按窗口索引的编辑状态池(输入缓冲/光标/视图偏移)。
+// 作为 iterm 工具(ToolType.CommandBar)挂载:条目(几何/显隐)在窗口 iterms 数组,
+// 编辑状态在本池按窗口 id 索引;两者由窗口 id 关联。
+// 显示/隐藏 = ToggleCommandBar(切换条目 visible);每窗独立,切焦点各自保留。
+// 渲染在 render/uilayer(scene 按焦点窗口 iterm 几何绘制),输入状态机在 main。
 package canvas
 
 import mem "../memory"
 
-// 悬浮控制台:命令输入框,锚定焦点 window 右上角。
-// 输入缓冲:行超宽时横向滚动(翻页),不折行;光标在缓冲内可自由移动。
+// 编辑状态;按窗口 id 索引(槽 0 保留),窗口销毁时由 DestroyWindowSlot 清槽
 MAX_CMD_INPUT :: 512
 
 CommandBar :: struct {
-	visible : bool,
 	input : [MAX_CMD_INPUT]u8, // 输入缓冲
 	len : int, // 已输入字节数
 	cursor : int, // 光标位置(字节,0..len;插入点)
 	view_offset : int, // 横向滚动视口起点(字节),跟随光标
 }
 
-command_bar : CommandBar
+command_bars : [MAX_WINDOW_SLOTS]CommandBar
 
-// 切换控制台可见性
-ToggleCommandBar :: proc() {
-	command_bar.visible = !command_bar.visible
-	if command_bar.visible {
-		command_bar.len = 0
-		command_bar.cursor = 0
-		command_bar.view_offset = 0
+// 窗口的 .CommandBar iterm 下标;无则 -1
+commandBarItermIndex :: proc(win : ^Window) -> int {
+	for i in 0 ..< len(win.iterms) {
+		if win.iterms[i].tool_type == .CommandBar {
+			return i
+		}
 	}
+	return -1
 }
 
-CommandBarVisible :: proc() -> bool {
-	return command_bar.visible
+// 切换 id(或焦点)window 的悬浮控制台:首开建 iterm 条目(锚右上角)
+// 并清空编辑状态;再开是切换显隐(打开时同样清空)。
+ToggleCommandBar :: proc(id : mem.Handle = {}) {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		return
+	}
+	win := NodeWindow(node_h)
+	if win == nil {
+		return
+	}
+	if bar := GetCommandBar(node_h); bar != nil {
+		clearBar(bar)
+	}
+	idx := commandBarItermIndex(win)
+	if idx < 0 {
+		node := GetWindowTreeNode(node_h)
+		if node == nil {
+			return
+		}
+		append(&win.iterms, Iterm {
+			tool_type = .CommandBar,
+			layer = 100,
+			visible = true,
+			width = node.width * 0.72,
+			height = 40, // 与 uilayer 的 bar_h 一致
+			window_ax = 1.0, window_ay = 0.0, // 锚窗口右上角
+			iterm_ax = 1.0, iterm_ay = 0.0,
+		})
+		return
+	}
+	win.iterms[idx].visible = !win.iterms[idx].visible
+}
+
+CommandBarVisible :: proc(id : mem.Handle = {}) -> bool {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		return false
+	}
+	win := NodeWindow(node_h)
+	if win == nil {
+		return false
+	}
+	idx := commandBarItermIndex(win)
+	return idx >= 0 && win.iterms[idx].visible
+}
+
+// 取 id(或焦点)window 的编辑状态;窗口无效返回 nil
+GetCommandBar :: proc(id : mem.Handle = {}) -> ^CommandBar {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		return nil
+	}
+	win := NodeWindow(node_h)
+	if win == nil {
+		return nil
+	}
+	node := GetWindowTreeNode(node_h) // 窗口句柄经节点取(id 是句柄,不在 Window 结构上)
+	if node == nil || node.window_id.id == 0 || node.window_id.id >= MAX_WINDOW_SLOTS {
+		return nil
+	}
+	return &command_bars[node.window_id.id]
+}
+
+clearBar :: proc(bar : ^CommandBar) {
+	bar.len = 0
+	bar.cursor = 0
+	bar.view_offset = 0
 }
 
 // 在光标处插入字节(0 = 光标前插入)
-CommandBarInsert :: proc(data : []byte) {
-	for b in data {
-		if command_bar.len >= len(command_bar.input) {
-			break
+CommandBarInsert :: proc(data : []byte, id : mem.Handle = {}) {
+	if bar := GetCommandBar(id); bar != nil {
+		for b in data {
+			if bar.len >= len(bar.input) {
+				break
+			}
+			// 光标后字符右移
+			for i := bar.len; i > bar.cursor; i -= 1 {
+				bar.input[i] = bar.input[i - 1]
+			}
+			bar.input[bar.cursor] = b
+			bar.cursor += 1
+			bar.len += 1
 		}
-		// 光标后字符右移
-		for i := command_bar.len; i > command_bar.cursor; i -= 1 {
-			command_bar.input[i] = command_bar.input[i - 1]
-		}
-		command_bar.input[command_bar.cursor] = b
-		command_bar.cursor += 1
-		command_bar.len += 1
 	}
 }
 
 // 退格:删光标前一个字符
-CommandBarBackspace :: proc() {
-	if command_bar.cursor <= 0 {
-		return
+CommandBarBackspace :: proc(id : mem.Handle = {}) {
+	if bar := GetCommandBar(id); bar != nil && bar.cursor > 0 {
+		for i := bar.cursor - 1; i < bar.len - 1; i += 1 {
+			bar.input[i] = bar.input[i + 1]
+		}
+		bar.cursor -= 1
+		bar.len -= 1
 	}
-	for i := command_bar.cursor - 1; i < command_bar.len - 1; i += 1 {
-		command_bar.input[i] = command_bar.input[i + 1]
-	}
-	command_bar.cursor -= 1
-	command_bar.len -= 1
 }
 
 // Delete:删光标后一个字符
-CommandBarDelete :: proc() {
-	if command_bar.cursor >= command_bar.len {
-		return
+CommandBarDelete :: proc(id : mem.Handle = {}) {
+	if bar := GetCommandBar(id); bar != nil && bar.cursor < bar.len {
+		for i := bar.cursor; i < bar.len - 1; i += 1 {
+			bar.input[i] = bar.input[i + 1]
+		}
+		bar.len -= 1
 	}
-	for i := command_bar.cursor; i < command_bar.len - 1; i += 1 {
-		command_bar.input[i] = command_bar.input[i + 1]
-	}
-	command_bar.len -= 1
 }
 
 // 光标左右移动(1 = 右,-1 = 左)
-CommandBarCursorMove :: proc(dir : int) {
-	command_bar.cursor = clamp(command_bar.cursor + dir, 0, command_bar.len)
+CommandBarCursorMove :: proc(dir : int, id : mem.Handle = {}) {
+	if bar := GetCommandBar(id); bar != nil {
+		bar.cursor = clamp(bar.cursor + dir, 0, bar.len)
+	}
 }
 
 // 光标移动到行首/行尾
-CommandBarHome :: proc() {
-	command_bar.cursor = 0
+CommandBarHome :: proc(id : mem.Handle = {}) {
+	if bar := GetCommandBar(id); bar != nil {
+		bar.cursor = 0
+	}
 }
 
-CommandBarEnd :: proc() {
-	command_bar.cursor = command_bar.len
+CommandBarEnd :: proc(id : mem.Handle = {}) {
+	if bar := GetCommandBar(id); bar != nil {
+		bar.cursor = bar.len
+	}
 }
 
 // 按词左右移动(跳过空白到下一个词边界)
-CommandBarWordMove :: proc(dir : int) {
+CommandBarWordMove :: proc(dir : int, id : mem.Handle = {}) {
+	bar := GetCommandBar(id)
+	if bar == nil {
+		return
+	}
 	is_space :: proc(b : u8) -> bool {
 		return b == ' ' || b == '\t'
 	}
-	c := command_bar.cursor
+	c := bar.cursor
 	if dir > 0 {
 		// 右移:跳过当前词和中间空白,停在下一词首
-		for c < command_bar.len && is_space(command_bar.input[c]) {
+		for c < bar.len && is_space(bar.input[c]) {
 			c += 1
 		}
-		for c < command_bar.len && !is_space(command_bar.input[c]) {
+		for c < bar.len && !is_space(bar.input[c]) {
 			c += 1
 		}
-		command_bar.cursor = c
+		bar.cursor = c
 	} else {
 		// 左移:跳过前词和前空白,停在前一非空白后(或 0)
 		if c > 0 {
 			// 跳过光标前空白
 			c -= 1
-			for c > 0 && is_space(command_bar.input[c - 1]) {
+			for c > 0 && is_space(bar.input[c - 1]) {
 				c -= 1
 			}
 			// 跳到词首
-			for c > 0 && !is_space(command_bar.input[c - 1]) {
+			for c > 0 && !is_space(bar.input[c - 1]) {
 				c -= 1
 			}
 		}
-		command_bar.cursor = c
+		bar.cursor = c
 	}
 }
 
 // 取走输入并清空(执行后调用)
-CommandBarTake :: proc() -> string {
-	s := string(command_bar.input[:command_bar.len])
-	command_bar.len = 0
-	command_bar.cursor = 0
-	command_bar.view_offset = 0
-	return s
+CommandBarTake :: proc(id : mem.Handle = {}) -> string {
+	if bar := GetCommandBar(id); bar != nil {
+		s := string(bar.input[:bar.len])
+		clearBar(bar)
+		return s
+	}
+	return ""
 }
-
-// 返回输入缓冲指针(渲染层读取绘制)
-GetCommandBar :: proc() -> ^CommandBar {
-	return &command_bar
-}
-
