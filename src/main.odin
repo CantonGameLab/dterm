@@ -1,4 +1,5 @@
-// 窗口主循环:初始化(经用户接口建三窗口布局)+ 简单循环(事件 → 更新 → 渲染)+ 清理。
+// 窗口主循环(纯编排壳):初始化 → 按 DAG 顺序调用各模块入口 → 清理。
+// 数据流:event/input → canvas → render,单向;main 不持业务状态。
 // 布局:
 //   0(root, LeftRight)
 //   ├─ 1(内部, UpDown)
@@ -7,21 +8,20 @@
 //   └─ 2(console:CascadiaMono 22 → powershell)
 package main
 
-import cv "canvas"
-import ev "event"
-import inp "input"
-import rd "render"
-import s3 "vendor:sdl3"
-import mem "memory"
+import "canvas"
+import "event"
+import "input"
+import "render"
+import "memory"
 import "core:fmt"
 
 main :: proc() {
-	if !rd.Init() {
+	if !render.Init() {
 		fmt.eprintln("render init failed")
 		return
 	}
-	defer rd.Quit()
-	if !inp.Init(rd.GetWindow()) {
+	defer render.Quit()
+	if !input.Init(render.GetWindow()) {
 		fmt.eprintln("input init failed")
 		return
 	}
@@ -31,167 +31,21 @@ main :: proc() {
 		return
 	}
 
-	theme := rd.Theme { fg = 0xDCDCDC, bg = 0x1E1E1E, cursor = 0xFFFFFF }
+	theme := render.Theme { fg = 0xDCDCDC, bg = 0x1E1E1E, cursor = 0xFFFFFF }
 
 	for {
-		inp.BeginFrame() // 清上一帧 pressed + 重置输入缓冲
-		if ev.Poll() {
+		input.BeginFrame() // 清上一帧边沿(事件泵先于本模块调用)
+		event.Update() // 事件泵 → 分发(源模块:尺寸→canvas,键鼠→input)
+		if event.QuitRequested() {
 			break
 		}
-
-		cv.ConsoleUpdateTree(cv.WindowTreeRoot())
-
-		cv.ProcessMouse() // 鼠标绑定:滚轮 review / 点击聚焦 / 应用鼠标模式(SGR)
-		if !cv.PollSessions() {
-			fmt.println("all sessions ended")
+		if !canvas.Update() { // 布局/输出/输入路由/会话,自管数据
+			fmt.println("all windows closed")
 			break
 		}
-		// 输入路由:绑定动作先消费(F2/翻页等);剩余输入按 modal 分发:
-		//   bar 可见 → CommandBar 编辑状态机;否则 → 应用(文本语义)
-		cv.ProcessKeys()
-		if cv.CommandBarVisible() {
-			if buf := inp.TakeAppInput(); len(buf) > 0 {
-				handleCmdBarInput(buf)
-			}
-		} else {
-			if buf := inp.TakeAppInput(); len(buf) > 0 {
-				cv.InputText(buf)
-			}
-		}
-		rd.BeginFrame()
-		rd.DrawFrame(theme)
-		rd.EndFrame()
-	}
-}
-
-// 控制台输入:逐字节解析(含转义序列键)。
-//   回车          :执行命令
-//   裸 ESC(ESC [ 之外的 ESC):关闭控制台
-//   ESC [ A/B/C/D :上/下/右/左(←→ 移动光标)
-//   ESC [ H/F     :Home/End
-//   ESC [ 1;5 D / 1;5 C:Ctrl+Left / Ctrl+Right(按词移动)
-//   退格          :删光标前;Delete(ESC [ 3 ~):删光标后
-//   可打印字符    :光标处插入
-//   其他控制字符  :丢弃
-handleCmdBarInput :: proc(buf : []u8) {
-	for b in buf {
-		cmdBarKey(b)
-	}
-	// 本帧结束仍停在"已见 ESC":说明是孤立 ESC 键(无后续序列字节)→ 关闭控制台。
-	// 方向键/Ctrl 组合的 ESC 序列同帧完整到达,不会滞留。
-	if esc_state == 1 {
-		esc_state = 0
-		cv.ToggleCommandBar()
-		cv.CommandBarTake() // 丢弃未完成输入
-	}
-}
-
-// 转义序列解析状态:0 = 无;1 = 已见 ESC;2 = 已见 ESC [;
-// 3 = ESC [ 3 ~(Delete);4 = ESC [ 1;(Ctrl 前缀);5 = ESC [ 1;5(Ctrl+键)
-esc_state : int
-
-cmdBarKey :: proc(b : u8) {
-	switch esc_state {
-	case 1: // 已见 ESC
-		if b == '[' {
-			esc_state = 2
-			return
-		}
-		// 裸 ESC(非 CSI 序列)= 关闭控制台
-		esc_state = 0
-		cv.ToggleCommandBar()
-		cv.CommandBarTake() // 丢弃未完成输入
-		return
-	case 2: // 已见 ESC [ → 识别最终字节
-		esc_state = 0
-		switch b {
-		case 'A', 'B': // 上/下:暂不支持(单行输入),忽略
-			return
-		case 'C': // 右
-			cv.CommandBarCursorMove(1)
-			return
-		case 'D': // 左
-			cv.CommandBarCursorMove(-1)
-			return
-		case 'H': // Home
-			cv.CommandBarHome()
-			return
-		case 'F': // End
-			cv.CommandBarEnd()
-			return
-		case '3': // Delete(ESC [ 3 ~):置状态等 '~'
-			esc_state = 3
-			return
-		case '1': // ESC [ 1(可能接 ';5 C/D' 的 Ctrl 组合)
-			esc_state = 4
-			return
-		case:
-			return
-		}
-	case 3: // ESC [ 3 ~ 的 '~'
-		esc_state = 0
-		if b == '~' {
-			cv.CommandBarDelete()
-		}
-		return
-	case 4: // ESC [ 1;... 的 ';'(修饰键前缀)
-		if b == ';' {
-			esc_state = 5
-			return
-		}
-		esc_state = 0
-		return
-	case 5: // ESC [ 1;5 X:Ctrl+修饰键(数字修饰位可多个,如 5=Ctrl)
-		switch b {
-		case 'C': // Ctrl+Right:按词右移
-			esc_state = 0
-			cv.CommandBarWordMove(1)
-		case 'D': // Ctrl+Left:按词左移
-			esc_state = 0
-			cv.CommandBarWordMove(-1)
-		case '0'..='9':
-			// 修饰位数字(如 5,Ctrl):留在状态 5 等 C/D
-			return
-		case:
-			esc_state = 0
-		}
-		return
-	}
-
-	// 正常输入
-	switch {
-	case b == '\r' || b == '\n':
-		execCmdBar()
-	case b == 0x1B: // 转义序列起始
-		esc_state = 1
-	case b == 0x7F || b == '\b': // 退格
-		cv.CommandBarBackspace()
-	case b < 0x20: // 其他控制字符丢弃
-		return
-	case:
-		single : [1]u8 = { b }
-		cv.CommandBarInsert(single[:])
-	}
-}
-
-// 取走控制台输入并执行。
-// 成功:关闭控制台;失败:保持打开 + 回显错误,便于修正。
-// 注意:关闭目标 = 执行前的窗口(destroy 等命令会迁移焦点/删窗,不能按执行后的焦点)
-execCmdBar :: proc() {
-	win_before := cv.GetFocusWindow()
-	cmd := cv.CommandBarTake()
-	if len(cmd) > 0 {
-		// 控制台是专用命令框,无 ':' 前缀
-		if cv.ExecuteCommandString(cmd) {
-			cv.ToggleCommandBar(win_before) // 关闭原窗口的条;窗口已销毁则 no-op
-		} else {
-			// 失败:回显错误提示,控制台保持打开
-			fmt.eprintln("CMD FAILED:", cmd)
-			err := "<cmd error>"
-			cv.CommandBarInsert(transmute([]u8)err)
-		}
-	} else {
-		cv.ToggleCommandBar(win_before)
+		render.BeginFrame()
+		render.DrawFrame(theme)
+		render.EndFrame()
 	}
 }
 
@@ -200,26 +54,26 @@ execCmdBar :: proc() {
 //                   1 → 3(console)+ 4(console)
 initWindows :: proc() -> bool {
 	// 根 0
-	root := cv.CreateWindowTreeRoot()
+	root := canvas.CreateWindowTreeRoot()
 	if root.id == 0 {
 		return false
 	}
 
 	// 0 分裂 → 1(左)+ 2(右);焦点移到新窗 2
-	cv.SplitNewWindow(.LeftRight)
-	win2 := cv.GetFocusWindow()
+	canvas.SplitNewWindow(.LeftRight)
+	win2 := canvas.GetFocusWindow()
 
 	// 焦点移到 1(左子),1 再分裂 → 3(上)+ 4(下)
-	if !cv.FocusMove(.Left) {
+	if !canvas.FocusMove(.Left) {
 		return false
 	}
-	win1 := cv.GetFocusWindow()
-	cv.SplitNewWindow(.UpDown)
-	win4 := cv.GetFocusWindow() // 新窗 = 下子 4
-	if !cv.FocusMove(.Up) {
+	win1 := canvas.GetFocusWindow()
+	canvas.SplitNewWindow(.UpDown)
+	win4 := canvas.GetFocusWindow() // 新窗 = 下子 4
+	if !canvas.FocusMove(.Up) {
 		return false
 	}
-	win3 := cv.GetFocusWindow() // 上子 3
+	win3 := canvas.GetFocusWindow() // 上子 3
 
 	// 三个 console 窗:2 / 3 / 4,各自不同字体、大小、cmd
 	// 字体名走系统目录(LoadFont 先按名找 .ttf/.otf/.ttc,找不到再当路径)
@@ -234,8 +88,8 @@ initWindows :: proc() -> bool {
 
 	// 只清会话、保留窗口与字体(窗口用于手动 launch 测试):
 	// 注意:DestroyConsole 参数是 console 句柄,不能直接传窗口句柄(槽 id 会撞车)
-	cv.ClearWindowConsole(win2)
-	cv.ClearWindowConsole(win3)
+	canvas.ClearWindowConsole(win2)
+	canvas.ClearWindowConsole(win3)
 
 	// 4:左下窗,msyh 26(.ttc)→ msys2 bash
 	if !setupConsole(win4, "consola", 26,
@@ -244,23 +98,19 @@ initWindows :: proc() -> bool {
 	}
 
 	// 焦点落到 3(左上),与布局顺序一致
-	cv.SetFocusWindow(win3)
+	canvas.SetFocusWindow(win3)
 	return true
 }
 
 // 配置并启动一个 console 窗:设字体 → 启动 cmd
-setupConsole :: proc(win : mem.Handle, font_path : string, size : f32, cmd : string) -> bool {
-	if !cv.SetWindowFont(font_path, size, win) {
+setupConsole :: proc(win : memory.Handle, font_path : string, size : f32, cmd : string) -> bool {
+	if !canvas.SetWindowFont(font_path, size, win) {
 		fmt.eprintln("SetWindowFont failed:", font_path)
 		return false
 	}
-	if !cv.LaunchConsole(cmd, win) {
+	if !canvas.LaunchConsole(cmd, win) {
 		fmt.eprintln("LaunchConsole failed:", cmd)
 		return false
 	}
 	return true
-}
-
-// 更新步:树遍历 + Console 布局/输出更新由 canvas 统一管理
-update :: proc() {
 }

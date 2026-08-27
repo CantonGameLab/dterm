@@ -6,6 +6,7 @@
 package canvas
 
 import mem "../memory"
+import "core:fmt"
 
 // 编辑状态;归属 Iterm 条目(经 using 提升为 iterm 字段)
 MAX_CMD_INPUT :: 512
@@ -202,4 +203,140 @@ CommandBarTake :: proc(id : mem.Handle = {}) -> string {
 		return s
 	}
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// 编辑输入状态机(bar 可见时的模态输入;原在 main,迁入使 canvas 自管)
+// ---------------------------------------------------------------------------
+
+// 转义序列解析状态:0 = 无;1 = 已见 ESC;2 = 已见 ESC [;
+// 3 = ESC [ 3 ~(Delete);4 = ESC [ 1;(Ctrl 前缀);5 = ESC [ 1;5(Ctrl+键)
+esc_state : int
+
+// bar 可见时消费输入字节(逐字节,含转义序列键)
+commandBarFeed :: proc(data : []byte) {
+	for b in data {
+		cmdBarKey(b)
+	}
+	// 本帧结束仍停在"已见 ESC":说明是孤立 ESC 键(无后续序列字节)→ 关闭控制台。
+	// 方向键/Ctrl 组合的 ESC 序列同帧完整到达,不会滞留。
+	if esc_state == 1 {
+		esc_state = 0
+		ToggleCommandBar()
+		CommandBarTake() // 丢弃未完成输入
+	}
+}
+
+// 单字节:
+//   回车          :执行命令
+//   裸 ESC(ESC [ 之外的 ESC):关闭控制台
+//   ESC [ A/B/C/D :上/下/右/左(←→ 移动光标)
+//   ESC [ H/F     :Home/End
+//   ESC [ 1;5 D / 1;5 C:Ctrl+Left / Ctrl+Right(按词移动)
+//   退格          :删光标前;Delete(ESC [ 3 ~):删光标后
+//   可打印字符    :光标处插入
+//   其他控制字符  :丢弃
+cmdBarKey :: proc(b : u8) {
+	switch esc_state {
+	case 1: // 已见 ESC
+		if b == '[' {
+			esc_state = 2
+			return
+		}
+		// 裸 ESC(非 CSI 序列)= 关闭控制台
+		esc_state = 0
+		ToggleCommandBar()
+		CommandBarTake() // 丢弃未完成输入
+		return
+	case 2: // 已见 ESC [ → 识别最终字节
+		esc_state = 0
+		switch b {
+		case 'A', 'B': // 上/下:暂不支持(单行输入),忽略
+			return
+		case 'C': // 右
+			CommandBarCursorMove(1)
+			return
+		case 'D': // 左
+			CommandBarCursorMove(-1)
+			return
+		case 'H': // Home
+			CommandBarHome()
+			return
+		case 'F': // End
+			CommandBarEnd()
+			return
+		case '3': // Delete(ESC [ 3 ~):置状态等 '~'
+			esc_state = 3
+			return
+		case '1': // ESC [ 1(可能接 ';5 C/D' 的 Ctrl 组合)
+			esc_state = 4
+			return
+		case:
+			return
+		}
+	case 3: // ESC [ 3 ~ 的 '~'
+		esc_state = 0
+		if b == '~' {
+			CommandBarDelete()
+		}
+		return
+	case 4: // ESC [ 1;... 的 ';'(修饰键前缀)
+		if b == ';' {
+			esc_state = 5
+			return
+		}
+		esc_state = 0
+		return
+	case 5: // ESC [ 1;5 X:Ctrl+修饰键(数字修饰位可多个,如 5=Ctrl)
+		switch b {
+		case 'C': // Ctrl+Right:按词右移
+			esc_state = 0
+			CommandBarWordMove(1)
+		case 'D': // Ctrl+Left:按词左移
+			esc_state = 0
+			CommandBarWordMove(-1)
+		case '0'..='9':
+			// 修饰位数字(如 5,Ctrl):留在状态 5 等 C/D
+			return
+		case:
+			esc_state = 0
+		}
+		return
+	}
+
+	// 正常输入
+	switch {
+	case b == '\r' || b == '\n':
+		execCmdBar()
+	case b == 0x1B: // 转义序列起始
+		esc_state = 1
+	case b == 0x7F || b == '\b': // 退格
+		CommandBarBackspace()
+	case b < 0x20: // 其他控制字符丢弃
+		return
+	case:
+		single : [1]u8 = { b }
+		CommandBarInsert(single[:])
+	}
+}
+
+// 取走控制台输入并执行。
+// 成功:关闭控制台;失败:保持打开 + 回显错误,便于修正。
+// 注意:关闭目标 = 执行前的窗口(destroy 等命令会迁移焦点/删窗,不能按执行后的焦点)
+execCmdBar :: proc() {
+	win_before := GetFocusWindow()
+	cmd := CommandBarTake()
+	if len(cmd) > 0 {
+		// 控制台是专用命令框,无 ':' 前缀
+		if ExecuteCommandString(cmd) {
+			ToggleCommandBar(win_before) // 关闭原窗口的条;窗口已销毁则 no-op
+		} else {
+			// 失败:回显错误提示,控制台保持打开
+			fmt.eprintln("CMD FAILED:", cmd)
+			err := "<cmd error>"
+			CommandBarInsert(transmute([]u8)err, win_before)
+		}
+	} else {
+		ToggleCommandBar(win_before)
+	}
 }

@@ -1,8 +1,9 @@
-// 输入模块:SDL 键盘/鼠标事件 → 设备通道状态 + 两个输入通道:
+// 输入模块:SDL 事件泵 + 键盘/鼠标事件 → 设备通道状态 + 两个输入通道:
 //   - 键序列通道(key_events):translateKey 输出(控制字符/特殊键转义序列),
 //     绑定层逐键裁决:命中动作不产生文本;未消费的最后进应用(文本语义)。
 //   - 文本通道(text_buffer):TEXT_INPUT(可打印字符,IME/Shift 组合)。
-// 单事件泵在 event 包,分发给 Handle;BeginFrame 每帧开头清边沿/队列/缓冲。
+// 入口 = Update(每帧一次:清边沿 → poll 全部事件 → 设备状态);退出通知/窗口
+// 尺寸变更经 QuitRequested/TakeResize 暴露。不依赖任何业务模块。
 package input
 
 import s3 "vendor:sdl3"
@@ -66,7 +67,7 @@ Init :: proc(window : ^s3.Window) -> bool {
 	return s3.StartTextInput(window)
 }
 
-// 每帧开头:清 pressed(edge 只活一帧)+ 输入通道 + 鼠标 edge
+// 每帧唯一入口:清上一帧边沿(事件泵在 event 模块,先于本模块调用)
 BeginFrame :: proc() {
 	for i in 0 ..< SCANCODE_COUNT {
 		Keys.pressed[i] = false
@@ -97,7 +98,7 @@ modFlags :: proc(mod : s3.Keymod) -> u8 {
 	return f
 }
 
-// 处理一个 SDL 事件(event.Poll 分发:键盘 + 鼠标)
+// 处理一个 SDL 事件(键盘 + 鼠标;event 模块分发)
 Handle :: proc(e : ^s3.Event) {
 	#partial switch e.type {
 	case .KEY_DOWN:
