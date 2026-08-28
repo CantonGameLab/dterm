@@ -60,4 +60,11 @@ main :: proc() {
 	// 再按一次 F2:关闭
 	cv.ToggleCommandBar()
 	fmt.printf("toggle-off: barVisible=%v\n", cv.CommandBarVisible())
+
+	// 用户场景:split right 新窗(空 leaf,无窗口对象)后 F2
+	split_h := cv.SplitNewWindow(.LeftRight)
+	fmt.printf("post-split: focus=%d\n", split_h.id)
+	ok := cv.ToggleCommandBar()
+	fmt.printf("toggle@split-new: ok=%v barVisible=%v\n", ok, cv.CommandBarVisible())
+	dump("final2")
 }

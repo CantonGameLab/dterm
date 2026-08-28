@@ -30,6 +30,7 @@ commandBarItermIndex :: proc(win : ^Window) -> int {
 
 // 切换 id(或焦点)window 的悬浮控制台:首开建 iterm 条目(锚右上角,状态零值);
 // 再开切换显隐(打开时清空编辑状态)。返回 true = 窗口有效(已创建/已切换)。
+// 空 leaf(split 新窗未设内容)自动建窗 —— CommandBar 是纯 UI 工具,与字体/会话无关。
 ToggleCommandBar :: proc(id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -37,7 +38,10 @@ ToggleCommandBar :: proc(id : mem.Handle = {}) -> bool {
 	}
 	win := NodeWindow(node_h)
 	if win == nil {
-		return false
+		win = ensureWindow(node_h)
+		if win == nil {
+			return false // 内部节点/无节点:不可挂载
+		}
 	}
 	if idx := commandBarItermIndex(win); idx >= 0 {
 		it := &win.iterms[idx]
