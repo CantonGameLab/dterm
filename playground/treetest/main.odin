@@ -61,9 +61,14 @@ main :: proc() {
 	cv.ToggleCommandBar()
 	fmt.printf("toggle-off: barVisible=%v\n", cv.CommandBarVisible())
 
-	// 用户场景:split right 新窗(空 leaf,无窗口对象)后 F2
+	// 用户场景:split right 新窗后 F2(split 自动分配 window)
 	split_h := cv.SplitNewWindow(.LeftRight)
-	fmt.printf("post-split: focus=%d\n", split_h.id)
+	sw := cv.NodeWindow(split_h)
+	it := -1
+	if sw != nil {
+		it = len(sw.iterms)
+	}
+	fmt.printf("post-split: focus=%d window=%v iterms=%d\n", split_h.id, sw != nil, it)
 	ok := cv.ToggleCommandBar()
 	fmt.printf("toggle@split-new: ok=%v barVisible=%v\n", ok, cv.CommandBarVisible())
 	dump("final2")

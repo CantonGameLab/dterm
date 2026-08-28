@@ -22,7 +22,9 @@ CreateWindowTreeRoot :: proc() -> mem.Handle {
 	return root
 }
 
-// 对 id(或焦点)window 按 dir 分裂出新 window(新节点,无窗口内容);新窗成为焦点
+// 对 id(或焦点)window 按 dir 分裂出新 window:自动分配窗口对象(空白窗格,
+// 后续 SetWindowFont/launch/工具直接可用);新窗成为焦点。
+// 树级 TreeNodeSplit 保持纯结构;窗口分配在用户语义层(SplitNewWindow)完成。
 SplitNewWindow :: proc(dir : SplitType, id : mem.Handle = {}) -> mem.Handle {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -32,6 +34,7 @@ SplitNewWindow :: proc(dir : SplitType, id : mem.Handle = {}) -> mem.Handle {
 	if !ok {
 		return {}
 	}
+	ensureWindow(new_h) // 分配窗口对象(建窗失败不阻塞 split;按需补建,幂等)
 	SetFocus(new_h)
 	return new_h
 }
