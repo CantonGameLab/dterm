@@ -157,6 +157,13 @@ GetWindow :: proc() -> ^s3.Window {
 // 帧
 // ---------------------------------------------------------------------------
 
+
+Update :: proc(theme : Theme) {
+	BeginFrame()
+	DrawFrame(theme)
+	EndFrame()
+}
+
 BeginFrame :: proc() {
 	w, h := GetWindowSize()
 	screen_w, screen_h = f32(w), f32(h)

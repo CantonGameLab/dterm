@@ -1,4 +1,8 @@
-// 指令语法解析:字符串 → 直接调用 canvas 用户接口(window.odin)。
+// 指令语法解析 + 数据化命令执行:
+//   ParseCommandString:字符串 → ParsedCommand(命令数据)
+//   ExecuteCommandString:字符串快捷入口(解析 + 执行)
+//   ExecuteCommand:ParsedCommand → userapi(唯一命令解释器;
+//     快捷键绑定表(keysbinding)生成的命令数据也走这里,不做第二次分派)
 // 供控制台交互 / 子进程 ANSI 指令通道使用。薄分派层,无 undo / 无历史栈。
 // 语法:命令名 参数... [@id]
 //   - 参数按空格分隔,"..." 包裹字符串
@@ -17,6 +21,11 @@ ExecuteCommandString :: proc(s : string, out : proc(msg : string) = nil) -> bool
 	if !ok {
 		return false
 	}
+	return ExecuteCommand(cmd, out)
+}
+
+// 数据化命令 → userapi(唯一解释器;kind 全集见 CommandStringKind)
+ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> bool {
 	switch cmd.kind {
 	case .Split:
 		// :split <right|down> [factor] [@id]
@@ -33,12 +42,27 @@ ExecuteCommandString :: proc(s : string, out : proc(msg : string) = nil) -> bool
 		return ExchangeWindow(cmd.fdir, cmd.target)
 	case .Font:
 		return SetWindowFont(cmd.sval, cmd.fval, cmd.target)
+	case .FontSize:
+		return SetWindowFontSize(cmd.fval, cmd.target)
+	case .FontSizeUp:
+		return AdjustFontSize(1, cmd.target)
+	case .FontSizeDown:
+		return AdjustFontSize(-1, cmd.target)
 	case .Launch:
 		return LaunchConsole(cmd.sval, cmd.target)
 	case .Feed:
 		return FeedConsole(transmute([]u8)cmd.sval, cmd.target)
 	case .AutoClose:
 		return SetAutoClose(cmd.bval, cmd.target)
+	case .Scroll:
+		return ConsoleScroll(int(cmd.fval), cmd.target)
+	case .ReviewUp:
+		return ConsoleScroll(-focusRows(cmd.target), cmd.target)
+	case .ReviewDown:
+		return ConsoleScroll(focusRows(cmd.target), cmd.target)
+	case .ToggleCommandBar:
+		ToggleCommandBar(cmd.target)
+		return true
 	case .Count:
 		if out != nil {
 			out(fmt.tprintf("windows: %d", WindowCount()))
@@ -54,6 +78,23 @@ ExecuteCommandString :: proc(s : string, out : proc(msg : string) = nil) -> bool
 	return false
 }
 
+// 焦点(或 target)console 的行数;无 console 返回 0(翻页/滚动安全空转)
+focusRows :: proc(target : mem.Handle) -> int {
+	node_h := resolveWindow(target)
+	if node_h.id == 0 {
+		return 0
+	}
+	win := NodeWindow(node_h)
+	if win == nil {
+		return 0
+	}
+	console := GetConsole(win.console_id)
+	if console == nil {
+		return 0
+	}
+	return int(console.rows)
+}
+
 // 解析结果:按 kind 判别取用字段
 CommandStringKind :: enum u8 {
 	Split,
@@ -63,9 +104,16 @@ CommandStringKind :: enum u8 {
 	Factor,
 	Exchange,
 	Font,
+	FontSize,     // fval:绝对字号
+	FontSizeUp,   // +1(绑定)
+	FontSizeDown, // -1(绑定)
 	Launch,
 	Feed,
 	AutoClose,
+	Scroll,       // fval:行数(正下负上)
+	ReviewUp,     // 上翻一屏(绑定 PageUp)
+	ReviewDown,   // 下翻一屏(绑定 PageDown)
+	ToggleCommandBar, // 悬浮控制台切换(绑定 F2)
 	Count,
 	FocusGet,
 }
@@ -170,6 +218,26 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 		pc.kind = .Font
 		pc.sval = args[0]
 		pc.fval = size
+	case "fontsize":
+		if argn < 1 {
+			return {}, false
+		}
+		size, ok := parseF32(args[0])
+		if !ok {
+			return {}, false
+		}
+		pc.kind = .FontSize
+		pc.fval = size
+	case "scroll":
+		if argn < 1 {
+			return {}, false
+		}
+		delta, ok := parseF32(args[0])
+		if !ok {
+			return {}, false
+		}
+		pc.kind = .Scroll
+		pc.fval = delta
 	case "launch":
 		if argn < 1 {
 			return {}, false

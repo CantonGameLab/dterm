@@ -332,6 +332,23 @@ GetFont :: proc(h : mem.Handle) -> ^Font {
 	return mem.Get(&fonts, h)
 }
 
+// 查询字号/路径(user API 改大小用;句柄无效返回 0/"")
+FontSize :: proc(h : mem.Handle) -> f32 {
+	font := GetFont(h)
+	if font == nil {
+		return 0
+	}
+	return font.size
+}
+
+FontPath :: proc(h : mem.Handle) -> string {
+	font := GetFont(h)
+	if font == nil {
+		return ""
+	}
+	return font.path
+}
+
 // ---------------------------------------------------------------------------
 // 字体度量:DWrite(Windows Terminal)兼容语义
 // ---------------------------------------------------------------------------

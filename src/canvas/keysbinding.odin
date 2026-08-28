@@ -1,15 +1,106 @@
-// 输入绑定层:输入设备事件 → 用户功能映射集中在此文件。
-// 两层职责分离:
-//   - 功能体 = window.odin 的用户函数(ConsoleScroll/SetFocus 等)
-//   - 本文件 = "事件 → 调用"绑定(滚轮 → 历史 review、点击 → 聚焦、
-//     应用鼠标模式 → SGR 编码写回 ConPTY)
-// 键盘快捷键绑定后续也集中于此;CommandBar 的编辑状态机仍在 main(独立输入模态)。
+// 输入绑定层:输入设备事件 → 数据化命令。
+// 单向管线:事件(input 通道)→ [mods+key] 查绑定表 → ParsedCommand(数据化 userapi
+// 封装)→ ExecuteCommand(唯一解释器);命中 = 纯动作(序列不进应用)。
+// 鼠标:滚轮 → review、点击 → 聚焦、应用鼠标模式(1000/1002/1003)→ SGR 编码写回。
 package canvas
 
 import ct "../conpty"
 import fnt "../font"
 import inp "../input"
 import "core:fmt"
+
+// ---------------------------------------------------------------------------
+// 快捷键绑定表(数据化):组合键(mods+key)→ 数据化命令
+// ---------------------------------------------------------------------------
+
+// 组合修饰:Alt/Ctrl/Shift 自由组合;规则 = Shift 不得单独出现(须与 Alt/Ctrl 伴生)
+KeyMod :: enum u8 {
+	Alt,
+	Ctrl,
+	Shift,
+	Win, // 事件侧保留(绑定表不用;事件含 Win 时与绑定不匹配)
+}
+
+KeyMods :: bit_set[KeyMod; u8]
+
+// input 修饰字节(1=Shift 2=Alt 4=Ctrl 8=Win)→ KeyMods
+modsFromByte :: proc(m : u8) -> KeyMods {
+	s : KeyMods
+	if m & 1 != 0 {
+		s += {.Shift}
+	}
+	if m & 2 != 0 {
+		s += {.Alt}
+	}
+	if m & 4 != 0 {
+		s += {.Ctrl}
+	}
+	if m & 8 != 0 {
+		s += {.Win}
+	}
+	return s
+}
+
+// 一条绑定:触发 = mods+key;动作 = 数据化命令(与字符串指令共用 ParsedCommand)
+Binding :: struct {
+	key : inp.Scancode,
+	mods : KeyMods,
+	cmd : ParsedCommand,
+}
+
+// 默认绑定表(数据;增改快捷键只动这里)
+default_bindings := [5]Binding{
+	{ key = .PAGEUP, mods = {}, cmd = { kind = .ReviewUp } },
+	{ key = .PAGEDOWN, mods = {}, cmd = { kind = .ReviewDown } },
+	{ key = .F2, mods = {}, cmd = { kind = .ToggleCommandBar } },
+	{ key = .EQUALS, mods = {.Ctrl, .Shift}, cmd = { kind = .FontSizeUp } },
+	{ key = .MINUS, mods = {.Ctrl, .Shift}, cmd = { kind = .FontSizeDown } },
+}
+
+// Shift 单独出现 = 非法绑定(规则校验,仅检查一次)
+bindings_checked : bool
+
+validateBindings :: proc() {
+	if bindings_checked {
+		return
+	}
+	bindings_checked = true
+	for b in default_bindings {
+		if b.mods == {.Shift} {
+			fmt.eprintln("binding invalid: Shift alone not allowed")
+		}
+	}
+}
+
+// 查绑定:精确匹配 (key, mods);命中返回命令
+findBinding :: proc(sc : u32, mods : KeyMods) -> (Binding, bool) {
+	if mods == {.Shift} {
+		return {}, false // Shift 单独 = 非法触发(不参与匹配)
+	}
+	for b in default_bindings {
+		if u32(b.key) == sc && b.mods == mods {
+			return b, true
+		}
+	}
+	return {}, false
+}
+
+// 每帧调用(事件已入 input 通道):绑定表 → ExecuteCommand(数据化动作)
+ProcessKeys :: proc() {
+	validateBindings()
+	n := inp.KeyEventCount()
+	for i in 0 ..< n {
+		ev := inp.KeyEventGet(i)
+		if ev == nil {
+			continue
+		}
+		if b, ok := findBinding(ev.sc, modsFromByte(ev.mods)); ok {
+			ExecuteCommand(b.cmd)
+			ev.consumed = true // 动作已执行,序列不再进应用
+		}
+	}
+	// 输入路由由 main 决定:bar 可见 → CommandBar 编辑状态机;否则 TakeAppInput → InputText
+}
 
 // 每帧调用(main):消费 input 包鼠标状态。
 // 命中规则:鼠标点所在 leaf = 动作目标;应用鼠标模式(?1000/1002/1003)优先接管。
@@ -52,40 +143,6 @@ ProcessMouse :: proc() {
 InputText :: proc(data : []byte) {
 	ConsoleExitReview()
 	FeedConsole(data)
-}
-
-// 键绑定表:scancode → 动作。命中 = 纯动作(不产生文本,不触发"输入退出 review")
-// —— review 中翻页快捷键只翻页;未命中的键序列 + TEXT_INPUT 文本走 InputText
-// (文本语义:退出 review + 送达应用)。
-ProcessKeys :: proc() {
-	focus_console := focusConsole()
-	rows := 0
-	if focus_console != nil {
-		rows = int(focus_console.rows)
-	}
-	n := inp.KeyEventCount()
-	for i in 0 ..< n {
-		ev := inp.KeyEventGet(i)
-		if ev == nil {
-			continue
-		}
-		bound := false
-		#partial switch inp.Scancode(ev.sc) {
-		case .PAGEUP:
-			ConsoleScroll(-rows) // 上翻一屏(进入 review)
-			bound = true
-		case .PAGEDOWN:
-			ConsoleScroll(rows) // 下翻一屏(滚到底自动回普通)
-			bound = true
-		case .F2:
-			ToggleCommandBar() // 悬浮控制台切换(user API;序列不进应用)
-			bound = true
-		}
-		if bound {
-			ev.consumed = true // 动作已执行,序列不再进应用
-		}
-	}
-	// 输入路由由 main 决定:bar 可见 → CommandBar 编辑状态机;否则 TakeAppInput → InputText
 }
 
 // 焦点窗口的 console(绑定动作的目标)

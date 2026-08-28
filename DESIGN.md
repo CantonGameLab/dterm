@@ -51,7 +51,7 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 | `vt.odin` | `VtState` | VT 语法语义分派(ESC/CSI/SGR/DEC 模式)+ 应答 |
 | `userapi.odin` | — | 用户接口函数族(id 省略 = 焦点) |
 | `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数 |
-| `keysbinding.odin` | — | 输入绑定(键表/鼠标/SGR 编码) |
+| `keysbinding.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),鼠标(滚轮/点击/SGR 编码) |
 
 ## 4. 程序状态(数据结构设计)
 
@@ -190,6 +190,8 @@ count                  # 窗口数量
 | `SetSplitFactor` | `(factor : f32, id = {}) -> bool` | 设父节点比例 |
 | `ExchangeWindow` | `(dir : FocusDirection, id = {}) -> bool` | 与方向邻居交换 window_id |
 | `SetWindowFont` | `(path : string, size : f32, id = {}) -> bool` | 设窗口字体(无窗则自动创建) |
+| `SetWindowFontSize` | `(size : f32, id = {}) -> bool` | 改字号(保留字体文件,同 path 新 size 重载;失败保留旧字体) |
+| `AdjustFontSize` | `(delta : f32, id = {}) -> bool` | 字号增量(快捷键 FontSizeUp/Down 目标;步长 1) |
 | `LaunchConsole` | `(cmd : string, id = {}) -> bool` | 用窗口字体启动会话;默认 auto_close=true |
 | `FeedConsole` | `(data : []byte, id = {}) -> bool` | 写输入到窗口 console |
 | `SetAutoClose` | `(b : bool, id = {}) -> bool` | 设置自动关闭 |

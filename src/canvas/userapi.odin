@@ -152,6 +152,45 @@ SetWindowFont :: proc(path : string, size : f32, id : mem.Handle = {}) -> bool {
 	return true
 }
 
+// 设置 id(或焦点)window 的字体大小(保留字体文件;同 path 新 size 重新加载,
+// 按 (path,size) 去重共享;失败保留旧字体)
+SetWindowFontSize :: proc(size : f32, id : mem.Handle = {}) -> bool {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		return false
+	}
+	win := NodeWindow(node_h)
+	if win == nil || win.font_id.id == 0 {
+		return false // 未设字体
+	}
+	path := fnt.FontPath(win.font_id)
+	if len(path) == 0 {
+		return false
+	}
+	new_font, ok := fnt.LoadFont(path, size)
+	if !ok {
+		return false
+	}
+	win.font_id = new_font
+	if console := GetConsole(win.console_id); console != nil {
+		console.font_id = new_font
+	}
+	return true
+}
+
+// 增量改字号(快捷键 FontSizeUp/Down 的绑定目标;步长 1)
+AdjustFontSize :: proc(delta : f32, id : mem.Handle = {}) -> bool {
+	node_h := resolveWindow(id)
+	if node_h.id == 0 {
+		return false
+	}
+	win := NodeWindow(node_h)
+	if win == nil || win.font_id.id == 0 {
+		return false
+	}
+	return SetWindowFontSize(fnt.FontSize(win.font_id) + delta, node_h)
+}
+
 // 清空 id(或焦点)window 的会话:销毁其 console + ConPTY,窗口与字体保留,
 // 之后可再次 LaunchConsole。与 DestroyWindow 不同,不删窗口。
 ClearWindowConsole :: proc(id : mem.Handle = {}) -> bool {

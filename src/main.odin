@@ -43,9 +43,7 @@ main :: proc() {
 			fmt.println("all windows closed")
 			break
 		}
-		render.BeginFrame()
-		render.DrawFrame(theme)
-		render.EndFrame()
+		render.Update(theme)
 	}
 }
 
