@@ -103,3 +103,11 @@ GetIndex :: proc(ga : ^GenArray($N, $T), i : int) -> ^T {
 	}
 	return &ga.data[i]
 }
+
+// 按槽位取标准句柄(含当前世代;与 Alive/GetIndex 配对,扁平遍历用)
+GetHandle :: proc(ga : ^GenArray($N, $T), i : int) -> Handle {
+	if !Alive(ga, i) {
+		return {}
+	}
+	return Handle { id = u32(i), generation = ga.generations[i] }
+}

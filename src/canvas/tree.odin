@@ -562,39 +562,60 @@ firstLeaf :: proc(h : mem.Handle) -> mem.Handle {
 	return firstLeaf(node.left_son_id)
 }
 
-// 遍历窗口树,更新每个 leaf 节点绑定的 Console 的布局(尺寸变化时
-// Resize ConPTY)并拉取输出。由 main 每帧调用一次;递归属于树结构操作,归 canvas 管理。
-ConsoleUpdateTree :: proc(node_h : mem.Handle) {
+// ---------------------------------------------------------------------------
+// 每帧更新:几何收集(树遍历) → 扁平 console 更新(连续数组遍历)
+// ---------------------------------------------------------------------------
+
+// 每帧工作表:console_id → 几何(树遍历收集,扁平更新消费)。
+// 分开遍历使数据操作扁平化:主循环遍历 consoles 连续数组(缓存友好),
+// 几何经 id 直接索引;树遍历退化为纯几何收集(节点数远小于 console 数)。
+console_geo : [MAX_CONSOLE_SLOTS]Transform
+console_geo_ok : [MAX_CONSOLE_SLOTS]bool
+
+// 树遍历(收集只读):leaf 挂载的 console → 几何填入索引表
+collectConsoleGeo :: proc(node_h : mem.Handle) {
 	node := GetWindowTreeNode(node_h)
 	if node == nil {
 		return
 	}
 	if !node.is_leaf {
-		ConsoleUpdateTree(node.left_son_id)
-		ConsoleUpdateTree(node.right_son_id)
+		collectConsoleGeo(node.left_son_id)
+		collectConsoleGeo(node.right_son_id)
 		return
 	}
 	win := NodeWindow(node_h)
-	if win == nil || GetConsole(win.console_id) == nil {
+	if win == nil || win.console_id.id == 0 {
 		return
 	}
-	console_h := win.console_id
-	console := GetConsole(console_h)
-	if console == nil {
-		return
+	if win.console_id.id < MAX_CONSOLE_SLOTS {
+		console_geo[win.console_id.id] = NodeContentTransform(node_h)
+		console_geo_ok[win.console_id.id] = true
 	}
+}
 
-	//检测Console 是否需要resize
-	t := NodeContentTransform(node_h)
-	m := fnt.GetMetrics(console.font_id)
-
-	old_rows, old_cols := console.rows, console.cols
-	ConsoleUpdateLayout(console_h, t, m.cell_width, m.cell_height)
-	if console.rows != old_rows || console.cols != old_cols {
-		ct.Resize(console.conpty_handle, console.cols, console.rows)
+// 遍历窗口树更新所有 Console:布局(尺寸变化 Resize ConPTY)+ 拉取输出。
+// 由 main 每帧调用一次;树遍历只收集几何,核心循环在 consoles 连续数组上。
+ConsoleUpdateTree :: proc(node_h : mem.Handle) {
+	for i in 0 ..< MAX_CONSOLE_SLOTS {
+		console_geo_ok[i] = false
 	}
+	collectConsoleGeo(node_h)
 
-	//通过vtparser自动更新Console
-	UpdateConsole(console_h)
+	for i in 0 ..< MAX_CONSOLE_SLOTS {
+		console := mem.GetIndex(&consoles, i)
+		if console == nil || !console_geo_ok[i] {
+			continue // 空槽 / 未挂窗口(工具 console 由 iterm 渲染流程各自处理)
+		}
+		console_h := mem.GetHandle(&consoles, i)
+		// 检测Console 是否需要 resize
+		m := fnt.GetMetrics(console.font_id)
+		old_rows, old_cols := console.rows, console.cols
+		ConsoleUpdateLayout(console_h, console_geo[i], m.cell_width, m.cell_height)
+		if console.rows != old_rows || console.cols != old_cols {
+			ct.Resize(console.conpty_handle, console.cols, console.rows)
+		}
+		// 通过 vtparser 自动更新 Console
+		UpdateConsole(console_h)
+	}
 }
 
