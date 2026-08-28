@@ -4,13 +4,12 @@ package canvas
 
 import ct "../conpty"
 import mem "../memory"
-import vp "../vtparse"
 import "core:fmt"
 
 // VT 解析:vtparse 状态机(字节流 → 动作回调),回调操作 Console。
 // 每帧 UpdateConsole(id) 拉取 ConPTY 输出喂给解析器;VtState 嵌在 Console.vt。
 VtState :: struct {
-	parser : vp.Parser, // 字节级状态机(切分序列)
+	parser : Parser, // 字节级状态机(切分序列)
 
 	style : CellStyle,
 	saved_cursor_row, saved_cursor_col : u16,
@@ -71,11 +70,11 @@ vtFeed :: proc(console_h : mem.Handle, data : []byte) {
 	if console == nil {
 		return
 	}
-	vp.Parse(&console.vt.parser, data)
+	Parse(&console.vt.parser, data)
 }
 
 // vtparse 回调 → canvas 操作(Console 句柄经 user_data 取回)
-vtParserCallback :: proc(p : ^vp.Parser, action : vp.Action, ch : rune) {
+vtParserCallback :: proc(p : ^Parser, action : Action, ch : rune) {
 	console_h := unpackHandle(p.user_data)
 	#partial switch action {
 	case .Print:
@@ -94,7 +93,7 @@ vtParserCallback :: proc(p : ^vp.Parser, action : vp.Action, ch : rune) {
 }
 
 // ESC 序列派发(无中间字节才处理;带中间字节的字符集/属性等忽略)
-vtEscDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
+vtEscDispatch :: proc(console_h : mem.Handle, p : ^Parser, final : u8) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
@@ -256,7 +255,7 @@ vtTargetRow :: proc(console : ^Console, p0 : int) -> int {
 // ---------------------------------------------------------------------------
 // CSI
 // ---------------------------------------------------------------------------
-vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
+vtCsiDispatch :: proc(console_h : mem.Handle, p : ^Parser, final : u8) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
@@ -441,7 +440,7 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^vp.Parser, final : u8) {
 	}
 }
 
-vtSetMode :: proc(console_h : mem.Handle, p : ^vp.Parser, set : bool) {
+vtSetMode :: proc(console_h : mem.Handle, p : ^Parser, set : bool) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
@@ -549,7 +548,7 @@ ANSI16 : [16]u32 = {
 	0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
 }
 
-vtSgr :: proc(console_h : mem.Handle, p : ^vp.Parser) {
+vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return

@@ -1,10 +1,10 @@
-// vtparse 状态机隔离测试:喂已知序列,打印回调动作,验证切分正确。
+// vtparse(已并入 canvas)状态机隔离测试:喂已知序列,打印回调动作,验证切分正确。
 package main
 
-import vp "../../src/vtparse"
+import cv "../../src/canvas"
 import "core:fmt"
 
-cb :: proc(p : ^vp.Parser, action : vp.Action, ch : rune) {
+cb :: proc(p : ^cv.Parser, action : cv.Action, ch : rune) {
 	fmt.printf("  %-12s ch=0x%02x", action, u32(ch))
 	if p.num_intermediate_chars > 0 {
 		fmt.printf(" int=[")
@@ -24,8 +24,8 @@ cb :: proc(p : ^vp.Parser, action : vp.Action, ch : rune) {
 }
 
 main :: proc() {
-	parser : vp.Parser
-	vp.Init(&parser, cb)
+	parser : cv.Parser
+	cv.Init(&parser, cb)
 
 	tests := []struct {
 		name : string,
@@ -51,7 +51,7 @@ main :: proc() {
 
 	for t in tests {
 		fmt.printf("== %s ==\n", t.name)
-		vp.Parse(&parser, transmute([]byte)t.data)
+		cv.Parse(&parser, transmute([]byte)t.data)
 		fmt.println()
 	}
 }

@@ -2,7 +2,7 @@
 // 忠实移植 + 两处必要补充:
 //   1. UTF-8:原版仅 ASCII,GROUND 会丢弃 0xC0-0xFF;终端需要中文等
 //   2. OSC 以 BEL(0x07)终止:xterm/ConPTY 实际用 BEL 结尾
-package vtparse
+package canvas
 
 Action :: enum u8 {
 	None = 0,

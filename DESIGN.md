@@ -294,7 +294,7 @@ DrawFrame(theme)
 ### 6.1 指令入口现状(V1 已实现)
 
 - **悬浮控制台指令**(已实现):F2 呼出悬浮输入框,输入指令回车执行(见 5.0)。这是当前唯一的指令入口,供用户交互。
-- **ANSI 子进程指令通道**(规划,未实现):子进程经扩展 ANSI 序列(`ESC]999;<cmd> ESC\`)向 dterm 发指令。需在 vtparse 加 OSC 999 识别 → 提取命令字符串 → `ExecuteCommandString`。
+- **ANSI 子进程指令通道**(规划,未实现):子进程经扩展 ANSI 序列(`ESC]999;<cmd> ESC\`)向 dterm 发指令。需在 OSC 999 识别 → 提取命令字符串 → `ExecuteCommandString`(vtparse 状态机已并入 canvas,`src/canvas/vtparse.odin`)。
 - 两者共用同一套指令语义(5.0),只是载体不同。
 
 ### 6.2 DLL 插件(规划,未实现)

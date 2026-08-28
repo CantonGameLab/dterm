@@ -4,7 +4,6 @@ package canvas
 
 import ct "../conpty"
 import mem "../memory"
-import vp "../vtparse"
 import "core:math"
 
 // ---------------------------------------------------------------------------
@@ -62,7 +61,7 @@ CreateConsole :: proc(rows, cols : u16, conpty_handle : mem.Handle) -> (h : mem.
 		return {}, false
 	}
 	// 解析器回调绑定(user_data 存句柄供回调取回)
-	vp.Init(&GetConsole(h).vt.parser, vtParserCallback)
+	Init(&GetConsole(h).vt.parser, vtParserCallback)
 	GetConsole(h).vt.parser.user_data = packHandle(h)
 	if !ConsoleAttachTermBuffer(h, tb_h) {
 		DestroyTermBuffer(tb_h)
