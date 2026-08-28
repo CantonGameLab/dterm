@@ -110,9 +110,9 @@ Handle :: proc(e : ^s3.Event) {
 		Keys.held[sc] = true
 		Mouse.mods = modFlags(k.mod)
 		seq, n := translateKey(k)
-		if n > 0 {
-			keyEventAppend(u32(sc), Mouse.mods, seq, n)
-		}
+		// 无条件入队:绑定表裁决需要全量键(含无序列的 = / - 等);
+		// n=0 的键未消费也不产生文本(可打印字符走 TEXT_INPUT 通道)
+		keyEventAppend(u32(sc), Mouse.mods, seq, n)
 	case .KEY_UP:
 		Keys.held[int(e.key.scancode)] = false
 		Mouse.mods = modFlags(e.key.mod)
