@@ -330,19 +330,22 @@ SetAutoClose :: proc(auto_close : bool, id : mem.Handle = {}) -> bool {
 	return true
 }
 
-// ---------------------------------------------------------------------------
-// 会话轮询(主循环每帧调用)
-// ---------------------------------------------------------------------------
-// 检测各 leaf 窗口的 console 会话是否结束(进程树归零或读管道断开);
-// 结束后按该窗口 auto_close 决定:true → 销毁窗口,false → 保留窗口(画面冻结)。
+// 会话轮询:遍历(只读收集会话状态)→ 处理段(单窗口动作)。
+// 遍历规范:一次遍历不改多种数据 —— 收集在遍历内,销毁/输出消费是显式处理段。
 // 返回 true = 仍有窗口(主循环继续);false = 所有窗口已关闭(程序可退出)。
-// 语义:会话结束按 auto_close 销毁窗口;窗口(哪怕空窗)还在就继续运行。
 PollSessions :: proc() -> bool {
-	alive := false
-	// 先收集所有 leaf(遍历中不修改树,避免指针失效)
+	// 遍历:收集(读树/窗口/会话;不修改任何数据)
 	leaves : [MAX_TREE_NODE_SLOTS]mem.Handle
 	count := 0
 	collectLeaves(WindowTreeRoot(), &leaves, &count)
+
+	SessionEnded :: struct {
+		node_h : mem.Handle,
+		auto_close : bool,
+	}
+	ended : [MAX_TREE_NODE_SLOTS]SessionEnded
+	ended_count := 0
+	alive := false
 	for i in 0 ..< count {
 		node_h := leaves[i]
 		win := NodeWindow(node_h)
@@ -357,14 +360,16 @@ PollSessions :: proc() -> bool {
 		// conpty 句柄无效(工具 console)时 JobActiveProcesses 返回 -1,视为无会话
 		jobs := ct.JobActiveProcesses(console.conpty_handle)
 		if jobs <= 0 || !ct.IsReadThreadAlive(console.conpty_handle) {
-			// 会话结束:进程树归零 / Job 查询失败(-1,视为结束)/ 读管道断开。
-			// 先消费剩余输出,再按 auto_close 处理
-			updateWindow(node_h)
-			if win.auto_close {
-				DestroyWindow(node_h)
-			}
-		} else {
-			// 存活会话(渲染照常)
+			ended[ended_count] = SessionEnded { node_h = node_h, auto_close = win.auto_close }
+			ended_count += 1
+		}
+	}
+
+	// 处理:每项动作(先消费剩余输出,再按 auto_close 销毁窗口)
+	for i in 0 ..< ended_count {
+		updateWindow(ended[i].node_h)
+		if ended[i].auto_close {
+			DestroyWindow(ended[i].node_h)
 		}
 	}
 	return alive

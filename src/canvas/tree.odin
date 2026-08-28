@@ -563,16 +563,15 @@ firstLeaf :: proc(h : mem.Handle) -> mem.Handle {
 }
 
 // ---------------------------------------------------------------------------
-// 每帧更新:几何收集(树遍历) → 扁平 console 更新(连续数组遍历)
+// 每帧更新(遍历规范:一次遍历只有一种数据;组合动作显式分趟)
 // ---------------------------------------------------------------------------
 
 // 每帧工作表:console_id → 几何(树遍历收集,扁平更新消费)。
-// 分开遍历使数据操作扁平化:主循环遍历 consoles 连续数组(缓存友好),
-// 几何经 id 直接索引;树遍历退化为纯几何收集(节点数远小于 console 数)。
 console_geo : [MAX_CONSOLE_SLOTS]Transform
 console_geo_ok : [MAX_CONSOLE_SLOTS]bool
+console_needs_resize : [MAX_CONSOLE_SLOTS]bool
 
-// 树遍历(收集只读):leaf 挂载的 console → 几何填入索引表
+// 遍历①(树):纯读,只写几何索引表 —— 一种数据(几何表)
 collectConsoleGeo :: proc(node_h : mem.Handle) {
 	node := GetWindowTreeNode(node_h)
 	if node == nil {
@@ -593,29 +592,58 @@ collectConsoleGeo :: proc(node_h : mem.Handle) {
 	}
 }
 
-// 遍历窗口树更新所有 Console:布局(尺寸变化 Resize ConPTY)+ 拉取输出。
-// 由 main 每帧调用一次;树遍历只收集几何,核心循环在 consoles 连续数组上。
-ConsoleUpdateTree :: proc(node_h : mem.Handle) {
+// 遍历②(console):只写 Console 布局(读几何表;尺寸变化 → 标记 resize 表)
+updateConsoleLayout :: proc() {
 	for i in 0 ..< MAX_CONSOLE_SLOTS {
-		console_geo_ok[i] = false
+		console := mem.GetIndex(&consoles, i)
+		if console == nil || !console_geo_ok[i] {
+			continue
+		}
+		console_h := mem.GetHandle(&consoles, i)
+		m := fnt.GetMetrics(console.font_id)
+		old_rows, old_cols := console.rows, console.cols
+		ConsoleUpdateLayout(console_h, console_geo[i], m.cell_width, m.cell_height)
+		if console.rows != old_rows || console.cols != old_cols {
+			console_needs_resize[i] = true
+		}
 	}
-	collectConsoleGeo(node_h)
+}
 
+// 遍历③(console):只写 ConPTY 数据(按标记 Resize;读 console 尺寸)
+updateConptyResize :: proc() {
+	for i in 0 ..< MAX_CONSOLE_SLOTS {
+		if !console_needs_resize[i] {
+			continue
+		}
+		console := mem.GetIndex(&consoles, i)
+		if console == nil {
+			continue
+		}
+		ct.Resize(console.conpty_handle, console.cols, console.rows)
+	}
+}
+
+// 遍历④(console):只消费输出(写终端数据:buffer + vt 状态)
+updateConsoleOutput :: proc() {
 	for i in 0 ..< MAX_CONSOLE_SLOTS {
 		console := mem.GetIndex(&consoles, i)
 		if console == nil || !console_geo_ok[i] {
 			continue // 空槽 / 未挂窗口(工具 console 由 iterm 渲染流程各自处理)
 		}
-		console_h := mem.GetHandle(&consoles, i)
-		// 检测Console 是否需要 resize
-		m := fnt.GetMetrics(console.font_id)
-		old_rows, old_cols := console.rows, console.cols
-		ConsoleUpdateLayout(console_h, console_geo[i], m.cell_width, m.cell_height)
-		if console.rows != old_rows || console.cols != old_cols {
-			ct.Resize(console.conpty_handle, console.cols, console.rows)
-		}
-		// 通过 vtparser 自动更新 Console
-		UpdateConsole(console_h)
+		UpdateConsole(mem.GetHandle(&consoles, i))
 	}
+}
+
+// 每帧对外编排:几何收集(树) → 布局(console) → resize(conpty) → 输出(console)。
+// 每趟独立遍历、只写一种数据;ConPTY 尺寸变更经标记表串接两趟。
+ConsoleUpdateTree :: proc(node_h : mem.Handle) {
+	for i in 0 ..< MAX_CONSOLE_SLOTS {
+		console_geo_ok[i] = false
+		console_needs_resize[i] = false
+	}
+	collectConsoleGeo(node_h)
+	updateConsoleLayout()
+	updateConptyResize()
+	updateConsoleOutput()
 }
 
