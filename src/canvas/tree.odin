@@ -563,6 +563,55 @@ firstLeaf :: proc(h : mem.Handle) -> mem.Handle {
 }
 
 // ---------------------------------------------------------------------------
+// 先序叶子序 + split 认领匹配(冷路径;每次操作前重算,树变后一致)
+// ---------------------------------------------------------------------------
+// 叶子序:先序 DFS(先左后右)访问叶子,得到从左到右的叶子序列。
+// 认领匹配(栈):先序遍历中,每遇非叶节点 push 其 id;每遇叶子 pop 栈顶
+// 认领。满二叉树 leaf = 内部节点 + 1,故每个 split 被唯一叶子认领,恰剩
+// 最右叶无认领(栈空)。等价刻画:认领叶 = 该 split 左子树的最右叶子。
+// 用途:叶子序号成为 split 的统一索引(factor 按认领寻址);叶子序相邻
+// 即"左/右交换"的邻居。
+// 结果表(模块级工作表,冷路径定长缓冲):
+
+leaf_order : [MAX_TREE_NODE_SLOTS]mem.Handle // 叶子序号(0-based)→ 叶子节点 id
+leaf_split_owner : [MAX_TREE_NODE_SLOTS]mem.Handle // 叶子序号 → 认领的 split 节点 id(0 = 无)
+leaf_count : int
+leaf_stack : [MAX_TREE_NODE_SLOTS]mem.Handle
+leaf_stack_top : int
+
+ComputeLeafOrder :: proc() {
+	leaf_count = 0
+	leaf_stack_top = 0
+	leafOrderWalk(WindowTreeRoot())
+}
+
+leafOrderWalk :: proc(h : mem.Handle) {
+	node := GetWindowTreeNode(h)
+	if node == nil {
+		return
+	}
+	if node.is_leaf {
+		if leaf_count < MAX_TREE_NODE_SLOTS {
+			leaf_order[leaf_count] = h
+			if leaf_stack_top > 0 {
+				leaf_stack_top -= 1
+				leaf_split_owner[leaf_count] = leaf_stack[leaf_stack_top]
+			} else {
+				leaf_split_owner[leaf_count] = {} // 最右叶:无认领
+			}
+			leaf_count += 1
+		}
+		return
+	}
+	if leaf_stack_top < MAX_TREE_NODE_SLOTS {
+		leaf_stack[leaf_stack_top] = h
+		leaf_stack_top += 1
+	}
+	leafOrderWalk(node.left_son_id)
+	leafOrderWalk(node.right_son_id)
+}
+
+// ---------------------------------------------------------------------------
 // 每帧更新(遍历规范:一次遍历只有一种数据;组合动作显式分趟)
 // ---------------------------------------------------------------------------
 

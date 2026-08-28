@@ -51,7 +51,7 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 | `vt.odin` | `VtState` | VT 语法语义分派(ESC/CSI/SGR/DEC 模式)+ 应答 |
 | `userapi.odin` | — | 用户接口函数族(id 省略 = 焦点) |
 | `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数 |
-| `keysbinding.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),鼠标(滚轮/点击/SGR 编码) |
+| `keybindings.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),`initDefaultKeyBindings` 运行时绑定完整默认表(Alt+H/J/K/L 焦点 / Alt+Shift+L/J 分屏 / Ctrl+Shift+H/J/K/L 几何方向交换 / Ctrl+Shift+W 销毁 / PageUp/Down 翻页 / F2 命令栏 / Ctrl+Shift+=/- 字号);鼠标(滚轮/点击/SGR 编码) |
 
 ## 4. 程序状态(数据结构设计)
 
@@ -190,6 +190,8 @@ count                  # 窗口数量
 | `SetSplitFactor` | `(factor : f32, id = {}) -> bool` | 设父节点比例 |
 | `ExchangeWindow` | `(dir : FocusDirection, id = {}) -> bool` | 与方向邻居交换 window_id |
 | `SetWindowFont` | `(path : string, size : f32, id = {}) -> bool` | 设窗口字体(无窗则自动创建) |
+| `SetDefaultLaunch` | `(cmd, font : string, size : f32)` | 默认启动配置:之后新建窗口(CreateWindowTreeRoot/SplitNewWindow)自动先设字体再启动;cmd/font 留空 = 对应项不自动应用(cmd 空 = 窗口不启动)。已有窗口不追溯 |
+| `GetDefaultLaunch` | `() -> (cmd, font : string, size : f32)` | 查询默认启动配置(借用,只读) |
 | `SetWindowFontSize` | `(size : f32, id = {}) -> bool` | 改字号(保留字体文件,同 path 新 size 重载;失败保留旧字体) |
 | `AdjustFontSize` | `(delta : f32, id = {}) -> bool` | 字号增量(快捷键 FontSizeUp/Down 目标;步长 1) |
 | `LaunchConsole` | `(cmd : string, id = {}) -> bool` | 用窗口字体启动会话;默认 auto_close=true |

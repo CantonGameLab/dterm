@@ -38,6 +38,8 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 		return DestroyWindow(cmd.target)
 	case .Factor:
 		return SetSplitFactor(cmd.fval, cmd.target)
+	case .FactorLeaf:
+		return SetSplitFactorLeaf(cmd.ival, cmd.fval)
 	case .Exchange:
 		return ExchangeWindow(cmd.fdir, cmd.target)
 	case .Font:
@@ -45,9 +47,9 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 	case .FontSize:
 		return SetWindowFontSize(cmd.fval, cmd.target)
 	case .FontSizeUp:
-		return AdjustFontSize(10, cmd.target)
+		return AdjustFontSize(5, cmd.target)
 	case .FontSizeDown:
-		return AdjustFontSize(-10, cmd.target)
+		return AdjustFontSize(-5, cmd.target)
 	case .Launch:
 		return LaunchConsole(cmd.sval, cmd.target)
 	case .Feed:
@@ -116,14 +118,16 @@ CommandStringKind :: enum u8 {
 	ToggleCommandBar, // 悬浮控制台切换(绑定 F2)
 	Count,
 	FocusGet,
+	FactorLeaf,   // ival:叶子序号(1-based)认领的 split;fval:新 factor
 }
 
 ParsedCommand :: struct {
 	kind : CommandStringKind,
 	target : mem.Handle, // @id 解析出的节点(带世代);0 = 焦点
 	dir : SplitType, // Split 用
-	fdir : FocusDirection, // Focus/Exchange 用
+	fdir : FocusDirection, // Focus 用;Exchange 仅 Left/Right(叶子序)
 	fval : f32, // Factor/Font
+	ival : int, // FactorLeaf:叶子序号(1-based)
 	bval : bool, // AutoClose
 	sval : string, // Font path / Launch cmd / Feed 文本(借用输入内存)
 }
@@ -196,6 +200,21 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 			return {}, false
 		}
 		pc.kind = .Factor
+		pc.fval = f
+	case "factorleaf":
+		if argn < 2 {
+			return {}, false
+		}
+		n, nok := parseU32(args[0])
+		if !nok {
+			return {}, false
+		}
+		f, fok := parseF32(args[1])
+		if !fok {
+			return {}, false
+		}
+		pc.kind = .FactorLeaf
+		pc.ival = int(n)
 		pc.fval = f
 	case "exchange":
 		if argn < 1 {

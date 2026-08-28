@@ -6,11 +6,58 @@ import ct "../conpty"
 import fnt "../font"
 import mem "../memory"
 import "core:fmt"
+import "core:strings"
+
+// ---------------------------------------------------------------------------
+// 默认启动配置(新建窗口时自动应用;cmd 留空 = 不自动启动)
+// ---------------------------------------------------------------------------
+// 状态属于用户接口层配置:API 设置生效于之后创建的窗口
+// (CreateWindowTreeRoot / SplitNewWindow),对已有窗口不追溯。
+// cmd 非空但 font 为空时,LaunchConsole 因无字体失败(启动前必须可设字体);
+// 正常用法是 cmd+font+size 一起设置,或全部留空 = 窗口不启动。
+default_cmd : string
+default_font : string
+default_font_size : f32
+
+// 设置默认启动配置(cmd/font 传空串 = 对应项不自动应用)
+SetDefaultLaunch :: proc(cmd, font : string, size : f32) {
+	if default_cmd != "" {
+		delete(default_cmd)
+	}
+	if default_font != "" {
+		delete(default_font)
+	}
+	default_cmd = strings.clone(cmd)
+	default_font = strings.clone(font)
+	default_font_size = size
+}
+
+// 查询默认启动配置(cmd/font 为内部存储借用,只读)
+GetDefaultLaunch :: proc() -> (cmd, font : string, size : f32) {
+	return default_cmd, default_font, default_font_size
+}
+
+// 新建窗口的自动应用:先字体后启动(先设字体,应用才能挂上)。
+// 只应用于创建瞬间,不影响窗口后续手动操作。
+applyDefaultLaunch :: proc(node_h : mem.Handle) {
+	if node_h.id == 0 {
+		return
+	}
+	if default_font != "" {
+		SetWindowFont(default_font, default_font_size, node_h)
+	}
+	if default_cmd != "" {
+		if !LaunchConsole(default_cmd, node_h) {
+			fmt.eprintln("default launch failed:", default_cmd)
+		}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // 窗口树
 // ---------------------------------------------------------------------------
-// 从空窗口树初始化根节点 + 根窗口,返回根节点 handle;重复调用幂等
+// 从空窗口树初始化根节点 + 根窗口,返回根节点 handle;重复调用幂等。
+// 根窗也按默认启动配置应用(cmd 留空 = 仅建窗不启动)。
 CreateWindowTreeRoot :: proc() -> mem.Handle {
 	InitWindowTree()
 	root := WindowTreeRoot()
@@ -18,6 +65,7 @@ CreateWindowTreeRoot :: proc() -> mem.Handle {
 	if win.id != 0 {
 		TreeNodeSetWindow(root, win)
 	}
+	applyDefaultLaunch(root)
 	SetFocus(root)
 	return root
 }
@@ -25,6 +73,7 @@ CreateWindowTreeRoot :: proc() -> mem.Handle {
 // 对 id(或焦点)window 按 dir 分裂出新 window:自动分配窗口对象(空白窗格,
 // 后续 SetWindowFont/launch/工具直接可用);新窗成为焦点。
 // 树级 TreeNodeSplit 保持纯结构;窗口分配在用户语义层(SplitNewWindow)完成。
+// 新窗按默认启动配置应用(cmd 留空 = 空白窗格不启动)。
 SplitNewWindow :: proc(dir : SplitType, id : mem.Handle = {}) -> mem.Handle {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -35,6 +84,7 @@ SplitNewWindow :: proc(dir : SplitType, id : mem.Handle = {}) -> mem.Handle {
 		return {}
 	}
 	ensureWindow(new_h) // 分配窗口对象(建窗失败不阻塞 split;按需补建,幂等)
+	applyDefaultLaunch(new_h)
 	SetFocus(new_h)
 	return new_h
 }
@@ -122,6 +172,25 @@ ExchangeWindow :: proc(dir : FocusDirection, id : mem.Handle = {}) -> bool {
 	}
 	a.window_id, b.window_id = b.window_id, a.window_id
 	return true
+}
+
+// 设置先序叶子序号(1-based)认领的 split 节点 factor;无认领(最右叶/越界)返回 false。
+// 认领覆盖全部 split(每个内部节点恰一个认领叶),叶子序号即所有 split_factor
+// 的统一索引。
+SetSplitFactorLeaf :: proc(n : int, factor : f32) -> bool {
+	if n < 1 {
+		return false
+	}
+	ComputeLeafOrder()
+	i := n - 1
+	if i >= leaf_count {
+		return false
+	}
+	owner := leaf_split_owner[i]
+	if owner.id == 0 {
+		return false
+	}
+	return TreeNodeSetSplitFactor(owner, factor)
 }
 
 // ---------------------------------------------------------------------------

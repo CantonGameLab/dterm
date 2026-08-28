@@ -48,25 +48,75 @@ Binding :: struct {
 	cmd : ParsedCommand,
 }
 
-// 默认绑定表(数据;增改快捷键只动这里)
-default_bindings := [5]Binding{
-	{ key = .PAGEUP, mods = {}, cmd = { kind = .ReviewUp } },
-	{ key = .PAGEDOWN, mods = {}, cmd = { kind = .ReviewDown } },
-	{ key = .F2, mods = {}, cmd = { kind = .ToggleCommandBar } },
-	{ key = .EQUALS, mods = {.Ctrl, .Shift}, cmd = { kind = .FontSizeUp } },
-	{ key = .MINUS, mods = {.Ctrl, .Shift}, cmd = { kind = .FontSizeDown } },
-}
+// 默认绑定表(运行时填充;增改快捷键只动 initDefaultKeyBindings)
+MAX_DEFAULT_BINDINGS :: 32
 
-// Shift 单独出现 = 非法绑定(规则校验,仅检查一次)
-bindings_checked : bool
+default_bindings : [MAX_DEFAULT_BINDINGS]Binding
+keybinding_count : int
+bindings_ready : bool
 
-validateBindings :: proc() {
-	if bindings_checked {
+// 绑定一套完整默认快捷键:
+//   Alt+H/J/K/L    焦点左/下/上/右(vim 键位,下同)
+//   Alt+Shift+L/J  向右/下分屏
+//   Ctrl+Shift+H/L 与几何左/右邻居交换窗口内容
+//   Ctrl+Shift+K/J 与几何上/下邻居交换窗口内容
+//   Ctrl+Shift+W   销毁焦点窗口
+//   PageUp/Down    历史翻页
+//   F2             命令栏
+//   Ctrl+Shift+=/- 字号增大/减小
+// 调整分割比(factor)走命令栏字符串命令;滚动有鼠标滚轮,均不占键。
+// Shift 不得单独出现(与 Alt/Ctrl 伴生,避免误触发大写/序列键)。
+initDefaultKeyBindings :: proc() {
+	if bindings_ready {
 		return
 	}
-	bindings_checked = true
-	for b in default_bindings {
-		if b.mods == {.Shift} {
+	bindings_ready = true
+
+	// 焦点
+	addBinding(.H, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Left })
+	addBinding(.L, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Right })
+	addBinding(.K, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Up })
+	addBinding(.J, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Down })
+
+	// 分屏
+	addBinding(.L, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .LeftRight })
+	addBinding(.J, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .UpDown })
+
+	// 交换(几何方向邻居)
+	addBinding(.H, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Left })
+	addBinding(.L, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Right })
+	addBinding(.K, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Up })
+	addBinding(.J, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Down })
+
+	// 销毁焦点窗口
+	addBinding(.W, {.Ctrl, .Shift}, ParsedCommand { kind = .Destroy })
+
+	// 历史翻页
+	addBinding(.PAGEUP, {}, ParsedCommand { kind = .ReviewUp })
+	addBinding(.PAGEDOWN, {}, ParsedCommand { kind = .ReviewDown })
+
+	// 命令栏
+	addBinding(.F2, {}, ParsedCommand { kind = .ToggleCommandBar })
+
+	// 字号
+	addBinding(.EQUALS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeUp })
+	addBinding(.MINUS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeDown })
+
+	validateBindings()
+}
+
+addBinding :: proc(key : inp.Scancode, mods : KeyMods, cmd : ParsedCommand) {
+	if keybinding_count >= MAX_DEFAULT_BINDINGS {
+		return
+	}
+	default_bindings[keybinding_count] = Binding { key = key, mods = mods, cmd = cmd }
+	keybinding_count += 1
+}
+
+// 规则校验(仅初始化时一次):Shift 单独出现 = 非法绑定
+validateBindings :: proc() {
+	for i in 0 ..< keybinding_count {
+		if default_bindings[i].mods == {.Shift} {
 			fmt.eprintln("binding invalid: Shift alone not allowed")
 		}
 	}
@@ -74,12 +124,14 @@ validateBindings :: proc() {
 
 // 查绑定:精确匹配 (key, mods);命中返回命令
 findBinding :: proc(sc : u32, mods : KeyMods) -> (Binding, bool) {
+	initDefaultKeyBindings()
 	if mods == {.Shift} {
 		return {}, false // Shift 单独 = 非法触发(不参与匹配)
 	}
-	for b in default_bindings {
+	for i in 0 ..< keybinding_count {
+		b := &default_bindings[i]
 		if u32(b.key) == sc && b.mods == mods {
-			return b, true
+			return b^, true
 		}
 	}
 	return {}, false
@@ -87,7 +139,6 @@ findBinding :: proc(sc : u32, mods : KeyMods) -> (Binding, bool) {
 
 // 每帧调用(事件已入 input 通道):绑定表 → ExecuteCommand(数据化动作)
 ProcessKeys :: proc() {
-	validateBindings()
 	n := inp.KeyEventCount()
 	for i in 0 ..< n {
 		ev := inp.KeyEventGet(i)

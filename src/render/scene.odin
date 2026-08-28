@@ -12,11 +12,13 @@ Theme :: struct {
 	fg     : u32, // 默认前景 0xRRGGBB
 	bg     : u32, // 默认背景
 	cursor : u32, // 光标色
+	focus_border : u32, // 焦点窗口边框高亮
 }
 
 // 每帧绘制入口:只读遍历窗口树
 DrawFrame :: proc(theme : Theme) {
 	drawWalk(cv.WindowTreeRoot(), theme)
+	drawFocusBorder(theme) // 焦点描边:画在所有内容与分割条之上
 	// 终端内容先上屏(flush 攒的 quad),否则 nano vulg 会画在终端之下
 	FlushBatch()
 	// UI 悬浮层(nanovg):在终端内容之上绘制控件
@@ -25,6 +27,26 @@ DrawFrame :: proc(theme : Theme) {
 		drawCommandBar(theme)
 		UiEnd()
 	}
+}
+
+// 焦点窗口边框高亮:焦点 leaf 矩形内侧描边(覆盖内容边缘,不动分割条)。
+FOCUS_BORDER_WIDTH :: f32(1.0)
+
+drawFocusBorder :: proc(theme : Theme) {
+	focus := cv.GetFocus()
+	if focus.id == 0 {
+		return
+	}
+	t := cv.NodeContentTransform(focus)
+	if t.width <= 0 || t.height <= 0 {
+		return
+	}
+	d := FOCUS_BORDER_WIDTH
+	c := theme.focus_border
+	DrawRect(t.position_x, t.position_y, t.width, d, c) // 上
+	DrawRect(t.position_x, t.position_y + t.height - d, t.width, d, c) // 下
+	DrawRect(t.position_x, t.position_y, d, t.height, c) // 左
+	DrawRect(t.position_x + t.width - d, t.position_y, d, t.height, c) // 右
 }
 
 // 悬浮控制台:遍历焦点窗口的 iterm 工具层,取 .CommandBar 可见条目

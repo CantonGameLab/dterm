@@ -1,6 +1,6 @@
 # dterm 项目规范
 
-Windows 终端模拟器(Odin + SDL3 + OpenGL 4.4 core + ConPTY)。
+Windows 终端模拟器(Odin + SDL3 + OpenGL 4.4 core + ConPTY)。完整规范见 `docs/CODING_STYLE.md`(本文件为其精炼版);完整工程体系(含理论根基/检查清单)见 skill `dod-engineer`(`.dsh/skills/dod-engineer/SKILL.md`)。
 
 ## 编码规则
 
