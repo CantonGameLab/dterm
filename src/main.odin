@@ -35,20 +35,52 @@ main :: proc() {
 		}
 		if !canvas.Update() { // 布局/输出/输入路由/会话,自管数据
 			fmt.println("all windows closed")
+			fmt.println("Thank you for using our terminal emulator sailor!")
 			break
 		}
 		render.Update()
 	}
 }
 
-// 初始化窗口布局(经用户接口):单窗 0,默认启动配置 = msys2 bash。
+// 初始化窗口布局(经用户接口):键位绑定 + 单窗 0,默认启动配置。
 initWindows :: proc() -> bool {
-	// 默认启动:新建窗口自动 设 consola 26 → 启动 msys2 bash;
-	// 默认配置须在 CreateWindowTreeRoot 之前设置(只对之后创建的窗口生效)
-	//canvas.SetDefaultLaunch(
-	//	"C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start",
-	//	"FiraCode Nerd Font Mono", 26)
+	// 键位绑定表(显式填充一次;查询纯读)
+	canvas.ClearKeyBindings()
 
+	// 焦点
+	canvas.SetKeyBinding(.H, {.Alt}, canvas.ParsedCommand { kind = .FocusDir, fdir = .Left })
+	canvas.SetKeyBinding(.L, {.Alt}, canvas.ParsedCommand { kind = .FocusDir, fdir = .Right })
+	canvas.SetKeyBinding(.K, {.Alt}, canvas.ParsedCommand { kind = .FocusDir, fdir = .Up })
+	canvas.SetKeyBinding(.J, {.Alt}, canvas.ParsedCommand { kind = .FocusDir, fdir = .Down })
+
+	// 分屏
+	canvas.SetKeyBinding(.L, {.Alt, .Shift}, canvas.ParsedCommand { kind = .Split, dir = .LeftRight })
+	canvas.SetKeyBinding(.J, {.Alt, .Shift}, canvas.ParsedCommand { kind = .Split, dir = .UpDown })
+
+	// 交换(几何方向邻居)
+	canvas.SetKeyBinding(.H, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .Exchange, fdir = .Left })
+	canvas.SetKeyBinding(.L, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .Exchange, fdir = .Right })
+	canvas.SetKeyBinding(.K, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .Exchange, fdir = .Up })
+	canvas.SetKeyBinding(.J, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .Exchange, fdir = .Down })
+
+	// 销毁焦点窗口
+	canvas.SetKeyBinding(.W, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .Destroy })
+
+	// 历史翻页
+	canvas.SetKeyBinding(.PAGEUP, {.Shift}, canvas.ParsedCommand { kind = .ReviewUp })
+	canvas.SetKeyBinding(.PAGEDOWN, {.Shift}, canvas.ParsedCommand { kind = .ReviewDown })
+
+	// 命令栏
+	canvas.SetKeyBinding(.F2, {}, canvas.ParsedCommand { kind = .ToggleCommandBar })
+
+	// 字号
+	canvas.SetKeyBinding(.EQUALS, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .FontSizeUp })
+	canvas.SetKeyBinding(.MINUS, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .FontSizeDown })
+
+
+	// 默认启动:新建窗口自动 设 FiraCode 26 → 启动 cmd;
+	// 默认配置须在 CreateWindowTreeRoot 之前设置(只对之后创建的窗口生效)
+	
 	canvas.SetDefaultLaunch(
 		"cmd.exe",
 		"FiraCode Nerd Font Mono", 26)

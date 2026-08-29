@@ -49,14 +49,13 @@ Binding :: struct {
 	cmd : ParsedCommand,
 }
 
-// 默认绑定表(运行时填充;增改快捷键只动 initDefaultKeyBindings)
+// 默认绑定表(userapi 管理:SetKeyBinding/ClearKeyBindings 操作,查询纯读)
 MAX_DEFAULT_BINDINGS :: 32
 
 default_bindings : [MAX_DEFAULT_BINDINGS]Binding
 keybinding_count : int
-bindings_ready : bool
 
-// 绑定一套完整默认快捷键:
+// 绑定一套完整默认快捷键(main.initWindows 调用一次;全部经 userapi 填表):
 //   Alt+H/J/K/L    焦点左/下/上/右(vim 键位,下同)
 //   Alt+Shift+L/J  向右/下分屏
 //   Ctrl+Shift+H/L 与几何左/右邻居交换窗口内容
@@ -67,68 +66,48 @@ bindings_ready : bool
 //   Ctrl+Shift+=/- 字号增大/减小
 // 调整分割比(factor)走命令栏字符串命令;滚动有鼠标滚轮,均不占键。
 // Shift 不得单独出现(与 Alt/Ctrl 伴生,避免误触发大写/序列键)。
-initDefaultKeyBindings :: proc() {
-	if bindings_ready {
-		return
-	}
-	bindings_ready = true
+// 幂等 = ClearKeyBindings 清零重建(无状态判定;重复调用 = 重新填充)。
+InitDefaultKeyBindings :: proc() {
+	ClearKeyBindings()
 
 	// 焦点
-	addBinding(.H, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Left })
-	addBinding(.L, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Right })
-	addBinding(.K, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Up })
-	addBinding(.J, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Down })
+	SetKeyBinding(.H, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Left })
+	SetKeyBinding(.L, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Right })
+	SetKeyBinding(.K, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Up })
+	SetKeyBinding(.J, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Down })
 
 	// 分屏
-	addBinding(.L, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .LeftRight })
-	addBinding(.J, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .UpDown })
+	SetKeyBinding(.L, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .LeftRight })
+	SetKeyBinding(.J, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .UpDown })
 
 	// 交换(几何方向邻居)
-	addBinding(.H, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Left })
-	addBinding(.L, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Right })
-	addBinding(.K, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Up })
-	addBinding(.J, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Down })
+	SetKeyBinding(.H, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Left })
+	SetKeyBinding(.L, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Right })
+	SetKeyBinding(.K, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Up })
+	SetKeyBinding(.J, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Down })
 
 	// 销毁焦点窗口
-	addBinding(.W, {.Ctrl, .Shift}, ParsedCommand { kind = .Destroy })
+	SetKeyBinding(.W, {.Ctrl, .Shift}, ParsedCommand { kind = .Destroy })
 
 	// 历史翻页
-	addBinding(.PAGEUP, {}, ParsedCommand { kind = .ReviewUp })
-	addBinding(.PAGEDOWN, {}, ParsedCommand { kind = .ReviewDown })
+	SetKeyBinding(.PAGEUP, {.Shift}, ParsedCommand { kind = .ReviewUp })
+	SetKeyBinding(.PAGEDOWN, {.Shift}, ParsedCommand { kind = .ReviewDown })
 
 	// 命令栏
-	addBinding(.F2, {}, ParsedCommand { kind = .ToggleCommandBar })
+	SetKeyBinding(.F2, {}, ParsedCommand { kind = .ToggleCommandBar })
 
 	// 字号
-	addBinding(.EQUALS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeUp })
-	addBinding(.MINUS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeDown })
+	SetKeyBinding(.EQUALS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeUp })
+	SetKeyBinding(.MINUS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeDown })
 
-	validateBindings()
 }
 
-addBinding :: proc(key : inp.Scancode, mods : KeyMods, cmd : ParsedCommand) {
-	if keybinding_count >= MAX_DEFAULT_BINDINGS {
-		return
-	}
-	default_bindings[keybinding_count] = Binding { key = key, mods = mods, cmd = cmd }
-	keybinding_count += 1
-}
 
-// 规则校验(仅初始化时一次):Shift 单独出现 = 非法绑定
-validateBindings :: proc() {
-	for i in 0 ..< keybinding_count {
-		if default_bindings[i].mods == {.Shift} {
-			fmt.eprintln("binding invalid: Shift alone not allowed")
-		}
-	}
-}
-
-// 查绑定:精确匹配 (key, mods);命中返回命令
+// 查绑定:精确匹配 (key, mods);命中返回命令(表由 InitDefaultKeyBindings 填充)
 findBinding :: proc(sc : u32, mods : KeyMods) -> (Binding, bool) {
-	initDefaultKeyBindings()
-	if mods == {.Shift} {
-		return {}, false // Shift 单独 = 非法触发(不参与匹配)
-	}
+	//if mods == {.Shift} {
+	//	return {}, false // Shift 单独 = 非法触发(不参与匹配)
+	//}
 	for i in 0 ..< keybinding_count {
 		b := &default_bindings[i]
 		if u32(b.key) == sc && b.mods == mods {

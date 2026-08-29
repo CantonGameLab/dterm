@@ -50,7 +50,7 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 | `console.odin` | `Console` | 视口生命周期 + 布局(居中/`viewportTop`/review 锚定) |
 | `vt.odin` | `VtState` | VT 语法语义分派(ESC/CSI/SGR/DEC 模式)+ 应答 |
 | `userapi.odin` | — | 用户接口函数族(id 省略 = 焦点) |
-| `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数 |
+| `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数(含 bind/unbind/bindings 键位配置命令;bind <mods+key> "<命令字符串>") |
 | `keybindings.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),`initDefaultKeyBindings` 运行时绑定完整默认表(Alt+H/J/K/L 焦点 / Alt+Shift+L/J 分屏 / Ctrl+Shift+H/J/K/L 几何方向交换 / Ctrl+Shift+W 销毁 / PageUp/Down 翻页 / F2 命令栏 / Ctrl+Shift+=/- 字号);鼠标(滚轮/点击/SGR 编码) |
 | `theme.odin` | `Theme` | 主题数据(fg/bg/cursor + 16 ANSI + UI 色);颜色引用编码归属(DEFAULT_COLOR/colorRgb/colorIndex/ResolveColor/ansi256ToRgb 固定公式);SetTheme/ThemeGet |
 

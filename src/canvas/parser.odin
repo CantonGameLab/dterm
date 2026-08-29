@@ -2,24 +2,32 @@
 //   ParseCommandString:字符串 → ParsedCommand(命令数据)
 //   ExecuteCommandString:字符串快捷入口(解析 + 执行)
 //   ExecuteCommand:ParsedCommand → userapi(唯一命令解释器;
-//     快捷键绑定表(keysbinding)生成的命令数据也走这里,不做第二次分派)
+//     快捷键绑定表(keybindings)生成的命令数据也走这里,不做第二次分派)
 // 供控制台交互 / 子进程 ANSI 指令通道使用。薄分派层,无 undo / 无历史栈。
 // 语法:命令名 参数... [@id]
 //   - 参数按空格分隔,"..." 包裹字符串
 //   - @id 放末尾指定目标节点(缺省 = 当前焦点)
-// 例:split right 0.5 / focus left / font "a.ttf" 40 / launch "cmd.exe" @3
+//   - bind/unbind 的键组合 = mods+key:alt/ctrl/shift/win 前缀以 '+' 连向键名
+//     (大小写不敏感,如 f2/alt+shift+l/ctrl+shift+=);目标命令 = 带引号命令字符串
+// 例:split right 0.5 / focus left / font "a.ttf" 40 / launch "cmd.exe" @3 /
+//    bind alt+shift+l "split right" / unbind f2 / bindings
 package canvas
 
 import "core:fmt"
 import "core:strings"
+import inp "../input"
 import mem "../memory"
 
 // 执行命令字符串;查询类命令的结果经 out 回调回传(控制台显示用)。
-// 返回 false = 语法错误或执行失败。
+// 返回 false = 语法错误或执行失败。bind 的子命令槽随消费释放。
 ExecuteCommandString :: proc(s : string, out : proc(msg : string) = nil) -> bool {
 	cmd, ok := ParseCommandString(s)
 	if !ok {
 		return false
+	}
+	// 子命令句柄 = 解析分配、解析+执行一体化消费后即释放(直接 Parse+Execute 的调用者自行释放)
+	defer if cmd.sub.id != 0 {
+		mem.Free(&sub_commands, cmd.sub)
 	}
 	return ExecuteCommand(cmd, out)
 }
@@ -64,6 +72,27 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 		return ConsoleScroll(focusRows(cmd.target), cmd.target)
 	case .ToggleCommandBar:
 		ToggleCommandBar(cmd.target)
+		return true
+	case .SetBinding:
+		// :bind <mods+key> "<命令字符串>" — 子命令已由解析层解析入表(sub 句柄),执行只读
+		sub := mem.Get(&sub_commands, cmd.sub)
+		if sub == nil {
+			return false
+		}
+		return SetKeyBinding(inp.Scancode(cmd.sc), cmd.mods, sub^)
+	case .UnsetBinding:
+		return UnsetKeyBinding(inp.Scancode(cmd.sc), cmd.mods)
+	case .BindingsGet:
+		if out != nil {
+			if keybinding_count == 0 {
+				out("(no bindings)")
+			}
+			for i in 0 ..< keybinding_count {
+				b := &default_bindings[i]
+				combo : [64]u8
+				out(fmt.tprintf("bind %s \"%v\"", comboName(b.mods, b.key, &combo), b.cmd.kind))
+			}
+		}
 		return true
 	case .Count:
 		if out != nil {
@@ -119,6 +148,9 @@ CommandStringKind :: enum u8 {
 	Count,
 	FocusGet,
 	FactorLeaf,   // ival:叶子序号(1-based)认领的 split;fval:新 factor
+	SetBinding,   // sc+mods:键组合;sval:目标命令字符串(执行时再解析)
+	UnsetBinding, // sc+mods:移除该绑定
+	BindingsGet,  // 枚举输出全部绑定
 }
 
 ParsedCommand :: struct {
@@ -130,7 +162,16 @@ ParsedCommand :: struct {
 	ival : int, // FactorLeaf:叶子序号(1-based)
 	bval : bool, // AutoClose
 	sval : string, // Font path / Launch cmd / Feed 文本(借用输入内存)
+	sc : u32, // SetBinding/UnsetBinding:scancode 数值
+	mods : KeyMods, // SetBinding/UnsetBinding:修饰位
+	sub : mem.Handle, // SetBinding:子命令(解析层 Alloc 入 sub_commands;消费后释放)
 }
+
+// bind 子命令表:解析层 Alloc(每次 bind 解析一个槽),ExecuteCommandString 消费后 Free。
+// 嵌套 bind 拒绝(子命令不再挂子命令,单层足够)。
+MAX_SUB_COMMANDS :: 32
+
+sub_commands : mem.GenArray(MAX_SUB_COMMANDS, ParsedCommand)
 
 // 把命令字符串解析为 ParsedCommand;字符串字段借用 s 内存(调用方保证 s 存活于本次调用)
 ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
@@ -279,10 +320,128 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 		pc.kind = .Count
 	case "focus-get", "getfocus":
 		pc.kind = .FocusGet
+	case "bind":
+		if argn < 2 {
+			return {}, false
+		}
+		key, mods, ok := parseKeyCombo(args[0])
+		if !ok {
+			return {}, false
+		}
+		sub, sub_ok := ParseCommandString(args[1])
+		if !sub_ok || sub.kind == .SetBinding || sub.kind == .UnsetBinding {
+			return {}, false // 非法目标命令(禁止嵌套 bind)
+		}
+		sub_h := mem.Alloc(&sub_commands, sub)
+		if sub_h.id == 0 {
+			return {}, false // 表满(子命令槽未消费;旧槽随消费释放)
+		}
+		pc.kind = .SetBinding
+		pc.sc = u32(key)
+		pc.mods = mods
+		pc.sub = sub_h
+	case "unbind":
+		if argn < 1 {
+			return {}, false
+		}
+		key, mods, ok := parseKeyCombo(args[0])
+		if !ok {
+			return {}, false
+		}
+		pc.kind = .UnsetBinding
+		pc.sc = u32(key)
+		pc.mods = mods
+	case "bindings":
+		pc.kind = .BindingsGet
+	case "fontsizeup":
+		pc.kind = .FontSizeUp
+	case "fontsizedown":
+		pc.kind = .FontSizeDown
+	case "reviewup":
+		pc.kind = .ReviewUp
+	case "reviewdown":
+		pc.kind = .ReviewDown
+	case "toggle-commandbar", "togglebar":
+		pc.kind = .ToggleCommandBar
 	case:
 		return {}, false
 	}
 	return pc, true
+}
+
+// "mods+key" → scancode + 修饰;键名 = 最后一段(大小写不敏感,
+// ScancodeFromName 内统一大写),mods 段 = alt/ctrl/shift/win(可零个,可重复出现)
+parseKeyCombo :: proc(s : string) -> (key : inp.Scancode, mods : KeyMods, ok : bool) {
+	if len(s) == 0 {
+		return {}, {}, false
+	}
+	key_start := 0
+	for i in 0 ..< len(s) {
+		if s[i] == '+' {
+			key_start = i + 1
+		}
+	}
+	if key_start >= len(s) {
+		return {}, {}, false
+	}
+	key, ok = inp.ScancodeFromName(s[key_start:])
+	if !ok {
+		return {}, {}, false
+	}
+	if key_start == 0 {
+		return key, {}, true // 无修饰
+	}
+	mod_part := s[:key_start - 1]
+	start := 0
+	for i in 0 ..= len(mod_part) {
+		if i == len(mod_part) || mod_part[i] == '+' {
+			switch mod_part[start:i] {
+			case "alt": mods += {.Alt}
+			case "ctrl", "ctl": mods += {.Ctrl}
+			case "shift": mods += {.Shift}
+			case "win", "super": mods += {.Win}
+			case: return {}, {}, false
+			}
+			start = i + 1
+		}
+	}
+	return key, mods, true
+}
+
+// 修饰 → 字符串前缀("alt+shift+";空修饰 = "";借用调用方缓冲,仅调用期间有效)
+modsPrefix :: proc(mods : KeyMods, buf : ^[32]u8) -> string {
+	if mods == {} {
+		return ""
+	}
+	n := 0
+	if .Alt in mods {
+		copy(buf[n:], "alt+")
+		n += 4
+	}
+	if .Ctrl in mods {
+		copy(buf[n:], "ctrl+")
+		n += 5
+	}
+	if .Shift in mods {
+		copy(buf[n:], "shift+")
+		n += 6
+	}
+	if .Win in mods {
+		copy(buf[n:], "win+")
+		n += 4
+	}
+	return string(buf[:n])
+}
+
+// 键组合显示名("alt+shift+l";借用调用方缓冲,仅调用期间有效)
+comboName :: proc(mods : KeyMods, key : inp.Scancode, buf : ^[64]u8) -> string {
+	n := len(modsPrefix(mods, cast(^[32]u8)buf))
+	kname := inp.ScancodeName(key)
+	if n + len(kname) < len(buf) {
+		copy(buf[n:], kname)
+		n += len(kname)
+	}
+	return string(buf[:n])
 }
 
 // 拆分参数:支持 "..." 字符串;返回 tokens(借用 s 内存)

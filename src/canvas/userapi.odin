@@ -4,6 +4,7 @@ package canvas
 
 import ct "../conpty"
 import fnt "../font"
+import inp "../input"
 import mem "../memory"
 import "core:fmt"
 import "core:strings"
@@ -51,6 +52,52 @@ applyDefaultLaunch :: proc(node_h : mem.Handle) {
 			fmt.eprintln("default launch failed:", default_cmd)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 快捷键绑定(数据化表操作:键位 → 命令的映射是配置数据)
+// ---------------------------------------------------------------------------
+// 添加/覆盖一条绑定(同 key+mods 覆盖已有);表满返回 false
+SetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods, cmd : ParsedCommand) -> bool {
+	for i in 0 ..< keybinding_count {
+		if default_bindings[i].key == key && default_bindings[i].mods == mods {
+			default_bindings[i].cmd = cmd
+			return true
+		}
+	}
+	if keybinding_count >= MAX_DEFAULT_BINDINGS {
+		return false
+	}
+	default_bindings[keybinding_count] = Binding { key = key, mods = mods, cmd = cmd }
+	keybinding_count += 1
+	return true
+}
+
+// 清空绑定表(重复初始化 = 清零重建,无状态判定)
+ClearKeyBindings :: proc() {
+	keybinding_count = 0
+}
+
+// 移除一条绑定(不存在 = false;交换删除,顺序无关)
+UnsetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> bool {
+	for i in 0 ..< keybinding_count {
+		if default_bindings[i].key == key && default_bindings[i].mods == mods {
+			default_bindings[i] = default_bindings[keybinding_count - 1]
+			keybinding_count -= 1
+			return true
+		}
+	}
+	return false
+}
+
+// 按 (key, mods) 查询绑定
+GetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> (Binding, bool) {
+	for i in 0 ..< keybinding_count {
+		if default_bindings[i].key == key && default_bindings[i].mods == mods {
+			return default_bindings[i], true
+		}
+	}
+	return {}, false
 }
 
 // ---------------------------------------------------------------------------

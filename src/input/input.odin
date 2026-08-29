@@ -8,6 +8,7 @@ package input
 
 import s3 "vendor:sdl3"
 import "core:mem"
+import "core:strings"
 
 // scancode 范围 0..511(枚举尾部 _ = 511)
 SCANCODE_COUNT :: 512
@@ -225,6 +226,33 @@ ClearText :: proc() {
 	for i in 0 ..< key_event_count {
 		key_events[i].consumed = true
 	}
+}
+
+// 键名 → scancode(SDL 名称 = SDL_SCANCODE_ 后缀:"F2"/"PAGEUP"/"EQUALS"/"W";
+// 大小写不敏感;未知名称返回 false)
+ScancodeFromName :: proc(name : string) -> (Scancode, bool) {
+	if len(name) == 0 {
+		return {}, false
+	}
+	cs := strings.clone_to_cstring(name)
+	defer delete(cs)
+	p := cast([^]u8)cs
+	for i in 0 ..< len(name) {
+		c := p[i]
+		if c >= 'a' && c <= 'z' {
+			p[i] = c - 32
+		}
+	}
+	sc := s3.GetScancodeFromName(cs)
+	if sc == .UNKNOWN {
+		return {}, false
+	}
+	return sc, true
+}
+
+// scancode → 键名(SDL 静态字符串,借用,只读)
+ScancodeName :: proc(sc : Scancode) -> string {
+	return string(s3.GetScancodeName(sc))
 }
 
 keyEventAppend :: proc(sc : u32, mods : u8, seq : [MAX_KEY_SEQ]u8, n : int) {
