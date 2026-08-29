@@ -47,9 +47,9 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 	case .FontSize:
 		return SetWindowFontSize(cmd.fval, cmd.target)
 	case .FontSizeUp:
-		return AdjustFontSize(5, cmd.target)
+		return AdjustFontSize(2, cmd.target)
 	case .FontSizeDown:
-		return AdjustFontSize(-5, cmd.target)
+		return AdjustFontSize(-2, cmd.target)
 	case .Launch:
 		return LaunchConsole(cmd.sval, cmd.target)
 	case .Feed:

@@ -8,6 +8,7 @@ import stbtt "vendor:stb/truetype"
 import gl "vendor:OpenGL"
 import win "core:sys/windows"
 import "core:c"
+import "core:fmt"
 import "core:os"
 import "core:math"
 import "core:strings"
@@ -35,7 +36,10 @@ Metrics :: struct {
 // 内部数据
 // ---------------------------------------------------------------------------
 
-MAX_FONT_SLOTS :: 8
+// 字体表容量 = 路径数 × 字号档数(同 path+size 复用,共享不销毁)。
+// 8 槽只够 7 档字号,AdjustFontSize 几次就撞顶;32 档 ≈ 单字体 26→181(步长 5),
+// 来回调整有回退复用;撞顶即调档失败,LoadFont 打日志。
+MAX_FONT_SLOTS :: 32
 MAX_FACES :: 2 // 0 = 主字体,1 = 中文 fallback,共用图集
 ATLAS_PAD :: 1 // 位图四周留 1px,防线性采样串色
 ATLAS_START :: 1024
@@ -447,6 +451,7 @@ LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1) -> (h : 
 	font.slots = make([dynamic]GlyphSlot, 64) // 哈希桶,装 0.75 后翻倍
 	face, fok := faceLoad(path, size)
 	if !fok {
+		fmt.eprintln("LoadFont: faceLoad failed:", path, size)
 		delete(font.slots)
 		if path_alloc {
 			delete(path)
@@ -497,6 +502,7 @@ LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1) -> (h : 
 
 	h = mem.Alloc(&fonts, font)
 	if h.id == 0 {
+		fmt.eprintln("LoadFont: font table full:", path, size)
 		fontFree(&font)
 		return {}, false
 	}
@@ -510,6 +516,34 @@ DestroyFont :: proc(h : mem.Handle) {
 	}
 	fontFree(font)
 	mem.Free(&fonts, h)
+}
+
+// 字体表是否已满(再 Alloc 会失败)
+FontTableFull :: proc() -> bool {
+	return fonts.count >= MAX_FONT_SLOTS - 1
+}
+
+// 表满回收:按引用集(used)清掉第一个未被使用的字体槽;
+// 全部在用返回 false。used 由调用方(引用者)扫描提供,font 包只认列表。
+EvictUnused :: proc(used : []mem.Handle) -> bool {
+	for i in 1 ..< MAX_FONT_SLOTS {
+		if !mem.Alive(&fonts, i) {
+			continue
+		}
+		h := mem.Handle { id = u32(i), generation = fonts.generations[i] }
+		in_use := false
+		for &u in used {
+			if u == h {
+				in_use = true
+				break
+			}
+		}
+		if !in_use {
+			DestroyFont(h)
+			return true
+		}
+	}
+	return false
 }
 
 // 查字形:缓存命中直接返回;未命中则光栅化入图集。false = 所有 face 都无此字形

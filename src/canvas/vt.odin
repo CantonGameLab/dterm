@@ -3,6 +3,7 @@
 package canvas
 
 import ct "../conpty"
+import inp "../input"
 import mem "../memory"
 import "core:fmt"
 
@@ -85,11 +86,129 @@ vtParserCallback :: proc(p : ^Parser, action : Action, ch : rune) {
 		vtEscDispatch(console_h, p, u8(ch))
 	case .CsiDispatch:
 		vtCsiDispatch(console_h, p, u8(ch))
-	case .OscStart, .OscPut, .OscEnd:
-		// OSC 内容暂不处理(标题/剪贴板后续)
+	case .OscStart:
+		osc_len = 0
+	case .OscPut:
+		oscDataAppend(ch)
+	case .OscEnd:
+		oscDispatch(console_h)
 	case .Hook, .Put, .Unhook:
 		// DCS 暂不处理
 	}
+}
+
+// ---------------------------------------------------------------------------
+// OSC(字符串收集 → 语义):当前处理 52(写剪贴板);其余忽略。
+// 包级缓冲(主循环单线程);超长 OSC 截断。
+// ---------------------------------------------------------------------------
+OSC_BUFFER :: 4096
+
+osc_data : [OSC_BUFFER]u8
+osc_len : int
+base64_scratch : [OSC_BUFFER]u8
+
+oscDataAppend :: proc(cp : rune) {
+	if osc_len + 4 > OSC_BUFFER {
+		return
+	}
+	osc_len += runeToUtf8(cp, osc_data[osc_len:])
+}
+
+// rune → UTF-8 字节(OscPut 是解码后的 rune,重编码回缓冲)
+runeToUtf8 :: proc(cp : rune, buf : []u8) -> int {
+	switch {
+	case cp < 0x80:
+		buf[0] = u8(cp)
+		return 1
+	case cp < 0x800:
+		buf[0] = 0xC0 | u8(cp >> 6)
+		buf[1] = 0x80 | u8(cp & 0x3F)
+		return 2
+	case cp < 0x10000:
+		buf[0] = 0xE0 | u8(cp >> 12)
+		buf[1] = 0x80 | u8(cp >> 6 & 0x3F)
+		buf[2] = 0x80 | u8(cp & 0x3F)
+		return 3
+	case:
+		buf[0] = 0xF0 | u8(cp >> 18)
+		buf[1] = 0x80 | u8(cp >> 12 & 0x3F)
+		buf[2] = 0x80 | u8(cp >> 6 & 0x3F)
+		buf[3] = 0x80 | u8(cp & 0x3F)
+		return 4
+	}
+}
+
+oscDispatch :: proc(console_h : mem.Handle) {
+	s := osc_data[:osc_len]
+	if len(s) == 0 {
+		return
+	}
+	num := 0
+	n := 0
+	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+		num = num * 10 + int(s[n] - '0')
+		n += 1
+	}
+	if n == 0 || n >= len(s) || s[n] != ';' {
+		return // 无类型号/无内容
+	}
+	payload := s[n + 1:]
+	switch num {
+	case 52: // 剪贴板:52;[c|s|p];base64(选择器可缺省)
+		if p := indexByte(payload, ';'); p >= 0 {
+			payload = payload[p + 1:]
+		}
+		if text, ok := base64Decode(payload); ok {
+			inp.SetClipboardText(text)
+		}
+	case 0, 1, 2, 8: // 标题/超链接:暂无消费
+	}
+}
+
+indexByte :: proc(s : []byte, b : u8) -> int {
+	for i in 0 ..< len(s) {
+		if s[i] == b {
+			return i
+		}
+	}
+	return -1
+}
+
+base64Decode :: proc(s : []byte) -> ([]byte, bool) {
+	out_len := 0
+	v : u32 = 0
+	bits : u32 = 0
+	for c in s {
+		if c == '=' {
+			break
+		}
+		val := b64Val(c)
+		if val < 0 {
+			return nil, false
+		}
+		v = v << 6 | u32(val)
+		bits += 6
+		if bits >= 8 {
+			bits -= 8
+			if out_len >= len(base64_scratch) {
+				return nil, false
+			}
+			base64_scratch[out_len] = u8(v >> bits & 0xFF)
+			out_len += 1
+		}
+	}
+	return base64_scratch[:out_len], true
+}
+
+b64Val :: proc(c : u8) -> int {
+	switch {
+	case c >= 'A' && c <= 'Z': return int(c - 'A')
+	case c >= 'a' && c <= 'z': return int(c - 'a') + 26
+	case c >= '0' && c <= '9': return int(c - '0') + 52
+	case c == '+': return 62
+	case c == '/': return 63
+	}
+	return -1
 }
 
 // ESC 序列派发(无中间字节才处理;带中间字节的字符集/属性等忽略)
@@ -216,22 +335,33 @@ vtReverseIndex :: proc(console_h : mem.Handle) {
 	vtScrollDown(console_h)
 }
 
-// RIS:复位终端(清屏 + 重置样式/滚动区/光标)
+// RIS:复位终端(全量:清屏 + 样式/滚动区/光标 + 所有模态回默认,xterm 语义)
 vtReset :: proc(console_h : mem.Handle) {
 	console := GetConsole(console_h)
 	if console == nil {
 		return
 	}
+	vt := &console.vt
+	// 交替屏退出(销毁交替页;进/出保存/恢复状态在 vtAltScreen 内完成)
+	if vt.alt_term_buffer_id.id != 0 {
+		vtAltScreen(console_h, false)
+	}
 	TermBufferClear(console.active_term_buffer_id)
-	console.vt.style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR }
-	console.vt.scroll_top = 0
-	console.vt.scroll_bottom = console.rows - 1
-	console.vt.autowrap = true
-	console.vt.wrap_pending = false
-	console.vt.origin_mode = false
-	console.vt.deccolm = false
-	console.vt.cursor_visible = true
-	console.vt.cursor_style = 0
+	vt.style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR }
+	vt.scroll_top, vt.scroll_bottom = 0, console.rows - 1
+	vt.autowrap = true
+	vt.wrap_pending = false
+	vt.origin_mode = false
+	vt.deccolm = false
+	vt.cursor_visible = true
+	vt.cursor_style = 0
+	vt.mouse_mode = 0
+	vt.sgr_mouse = false
+	vt.focus_events = false
+	vt.bracketed_paste = false
+	vt.modify_other_keys = 0
+	vt.saved_cursor_row, vt.saved_cursor_col = 0, 0
+	vt.saved_scroll_top, vt.saved_scroll_bottom = 0, console.rows - 1
 	console.cursor_row, console.cursor_col = 0, 0
 }
 
@@ -368,11 +498,12 @@ vtCsiDispatch :: proc(console_h : mem.Handle, p : ^Parser, final : u8) {
 		}
 	case 's': // 存光标
 		vt.saved_cursor_row, vt.saved_cursor_col = console.cursor_row, console.cursor_col
-	case 'u': // 取光标;'?' 私用 = modifyOtherKeys 光标位置报告(应答 \e[?r;cR)
+	case 'u': // 光标恢复(无私用 = 0);'?' = modifyOtherKeys CPR 应答;
+		// '>'/'<' = kitty 键盘协议查询(忽略,不得当光标恢复!)
 		vt.wrap_pending = false
 		if private == '?' {
 			vtReplyCursorDec(console_h)
-		} else {
+		} else if private == 0 {
 			console.cursor_row, console.cursor_col = vt.saved_cursor_row, vt.saved_cursor_col
 		}
 	case 'S': // SU
@@ -576,21 +707,38 @@ vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 		case 24: style.underline = false
 		case 27: style.reverse = false
 		case 30 ..= 37: style.fg = ANSI16[pp - 30]
-		case 38, 48: // 38;5;n / 38;2;r;g;b;也兼容冒号子参数 38:2::r:g:b(多一个 colorspace 字段)
-			if i + 1 < len(params) {
+		case 38, 48: // 扩展色:分号式 38;2;r;g;b / 38;5;n;冒号式 38:2::r:g:b / 38:5::n
+			if int(p.num_subparams[i]) > 1 {
+				// 冒号式:组内子参 [38, mode, ...];RGB 带 colorspace 槽(cs 非 0 拒绝,
+				// 与 WT 一致:非标准 ODA 序列以非零 cs 暴露错误);256 索引取最后一个
+				// 子参(兼容 :5:n 与 :5::n,空段 = 0)。
+				s := &p.subparams[i]
+				mode := s[1]
+				switch mode {
+				case 5:
+					n := s[int(p.num_subparams[i]) - 1]
+					color := ansi256ToRgb(int(n))
+					if pp == 38 { style.fg = color } else { style.bg = color }
+				case 2:
+					if p.num_subparams[i] == 6 && s[2] == 0 {
+						color := (u32(s[3]) << 16) | (u32(s[4]) << 8) | u32(s[5])
+						if pp == 38 { style.fg = color } else { style.bg = color }
+					}
+				}
+			} else if i + 1 < len(params) {
+				// 分号式:38 后的组 = mode;值取后续组(RGB 限 < 256 与 WT/xterm 一致)
 				mode := params[i + 1]
 				if mode == 5 && i + 2 < len(params) {
-					// 冒号格式 38:5::n 有 4 个参数,分号格式 38;5;n 有 3 个
-					skip := 1 if i + 3 < len(params) else 0
-					color := ansi256ToRgb(params[i + 2 + skip])
+					color := ansi256ToRgb(params[i + 2])
 					if pp == 38 { style.fg = color } else { style.bg = color }
-					i += 2 + skip
+					i += 2
 				} else if mode == 2 && i + 4 < len(params) {
-					// 冒号格式 38:2::r:g:b 有 6 个参数(含 colorspace),分号格式 38;2;r;g;b 有 5 个
-					skip := 1 if i + 5 < len(params) else 0
-					color := (u32(params[i + 2 + skip]) << 16) | (u32(params[i + 3 + skip]) << 8) | u32(params[i + 4 + skip])
-					if pp == 38 { style.fg = color } else { style.bg = color }
-					i += 4 + skip
+					r, g, b := params[i + 2], params[i + 3], params[i + 4]
+					if r <= 255 && g <= 255 && b <= 255 {
+						color := (u32(r) << 16) | (u32(g) << 8) | u32(b)
+						if pp == 38 { style.fg = color } else { style.bg = color }
+					}
+					i += 4
 				}
 			}
 		case 39: style.fg = DEFAULT_COLOR

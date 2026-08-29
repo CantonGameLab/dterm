@@ -612,86 +612,67 @@ leafOrderWalk :: proc(h : mem.Handle) {
 }
 
 // ---------------------------------------------------------------------------
-// 每帧更新(遍历规范:一次遍历只有一种数据;组合动作显式分趟)
+// 每帧更新(遍历按需分层:趟消费什么层的数据就遍历哪层,真源就地读,无跨层工作表):
+//   ① 布局 —— 消费 node 几何 → 遍历 node(树),写 Console 布局
+//   ② 尺寸应用 —— 只碰 console/conpty 数据 → 遍历 console
+//   ③ 输出 —— 只碰 console 数据 → 遍历 console
+// 各趟写入数据仍保持单一;跨趟信息 = 数据自身(目标 vs 已应用,比较即知)。
 // ---------------------------------------------------------------------------
 
-// 每帧工作表:console_id → 几何(树遍历收集,扁平更新消费)。
-console_geo : [MAX_CONSOLE_SLOTS]Transform
-console_geo_ok : [MAX_CONSOLE_SLOTS]bool
-console_needs_resize : [MAX_CONSOLE_SLOTS]bool
-
-// 遍历①(树):纯读,只写几何索引表 —— 一种数据(几何表)
-collectConsoleGeo :: proc(node_h : mem.Handle) {
+// 遍历①(node 树):每个挂 console 的 leaf:就地读几何(节点真源),写 Console 布局。
+layoutWalk :: proc(node_h : mem.Handle) {
 	node := GetWindowTreeNode(node_h)
 	if node == nil {
 		return
 	}
 	if !node.is_leaf {
-		collectConsoleGeo(node.left_son_id)
-		collectConsoleGeo(node.right_son_id)
+		layoutWalk(node.left_son_id)
+		layoutWalk(node.right_son_id)
 		return
 	}
 	win := NodeWindow(node_h)
 	if win == nil || win.console_id.id == 0 {
 		return
 	}
-	if win.console_id.id < MAX_CONSOLE_SLOTS {
-		console_geo[win.console_id.id] = NodeContentTransform(node_h)
-		console_geo_ok[win.console_id.id] = true
+	console := GetConsole(win.console_id)
+	if console == nil {
+		return
 	}
+	m := fnt.GetMetrics(win.font_id) // 字体 = 窗口配置(唯一真相;console 无副本)
+	ConsoleUpdateLayout(win.console_id, NodeContentTransform(node_h), m.cell_width, m.cell_height)
 }
 
-// 遍历②(console):只写 Console 布局(读几何表;尺寸变化 → 标记 resize 表)
-updateConsoleLayout :: proc() {
-	for i in 0 ..< MAX_CONSOLE_SLOTS {
-		console := mem.GetIndex(&consoles, i)
-		if console == nil || !console_geo_ok[i] {
-			continue
-		}
-		console_h := mem.GetHandle(&consoles, i)
-		m := fnt.GetMetrics(console.font_id)
-		old_rows, old_cols := console.rows, console.cols
-		ConsoleUpdateLayout(console_h, console_geo[i], m.cell_width, m.cell_height)
-		if console.rows != old_rows || console.cols != old_cols {
-			console_needs_resize[i] = true
-		}
-	}
-}
-
-// 遍历③(console):只写 ConPTY 数据(按标记 Resize;读 console 尺寸)
+// 遍历②(console):目标尺寸(rows/cols)与 ConPTY 已应用(pty_*)比较,
+// 变化才 Resize 并更新已应用记录。工具 console(conpty = 0)跳过。
 updateConptyResize :: proc() {
 	for i in 0 ..< MAX_CONSOLE_SLOTS {
-		if !console_needs_resize[i] {
+		console := mem.GetIndex(&consoles, i)
+		if console == nil || ct.GetConptyContext(console.conpty_handle) == nil {
 			continue
 		}
-		console := mem.GetIndex(&consoles, i)
-		if console == nil {
+		if console.rows == console.pty_rows && console.cols == console.pty_cols {
 			continue
 		}
 		ct.Resize(console.conpty_handle, console.cols, console.rows)
+		console.pty_rows, console.pty_cols = console.rows, console.cols
 	}
 }
 
-// 遍历④(console):只消费输出(写终端数据:buffer + vt 状态)
+// 遍历③(console):消费会话输出(buffer + vt 状态);工具 console 无 conpty 跳过。
 updateConsoleOutput :: proc() {
 	for i in 0 ..< MAX_CONSOLE_SLOTS {
 		console := mem.GetIndex(&consoles, i)
-		if console == nil || !console_geo_ok[i] {
-			continue // 空槽 / 未挂窗口(工具 console 由 iterm 渲染流程各自处理)
+		if console == nil || ct.GetConptyContext(console.conpty_handle) == nil {
+			continue
 		}
 		UpdateConsole(mem.GetHandle(&consoles, i))
 	}
 }
 
-// 每帧对外编排:几何收集(树) → 布局(console) → resize(conpty) → 输出(console)。
-// 每趟独立遍历、只写一种数据;ConPTY 尺寸变更经标记表串接两趟。
+// 每帧对外编排:布局(树) → 尺寸应用 → 输出。
+// 趟序契约:布局先行(输出消费布局后的视口状态)。
 ConsoleUpdateTree :: proc(node_h : mem.Handle) {
-	for i in 0 ..< MAX_CONSOLE_SLOTS {
-		console_geo_ok[i] = false
-		console_needs_resize[i] = false
-	}
-	collectConsoleGeo(node_h)
-	updateConsoleLayout()
+	layoutWalk(node_h)
 	updateConptyResize()
 	updateConsoleOutput()
 }

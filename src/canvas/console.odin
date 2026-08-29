@@ -14,7 +14,8 @@ MAX_CONSOLE_SLOTS :: 32
 MAX_BUFFERS_PER_CONSOLE :: 8
 
 Console :: struct {
-	rows, cols : u16,
+	rows, cols : u16, // 目标网格尺寸(布局趟真源,每帧由窗口几何重算)
+	pty_rows, pty_cols : u16, // ConPTY 已应用尺寸(尺寸应用趟与 rows/cols 比较判变化)
 	origin_x, origin_y : f32, // 居中后网格左上角(iterm 坐标空间);每帧由 ConsoleUpdateLayout 重算
 	cursor_row, cursor_col : u16, // 指向 active buffer 的物理行
 
@@ -26,7 +27,6 @@ Console :: struct {
 
 	conpty_handle : mem.Handle, // 绑定的 ConPTY
 
-	font_id : mem.Handle, // 布局取度量、渲染取图集;0 = 未设
 	font_size : f32, // 创建时的目标字号
 }
 
@@ -47,6 +47,8 @@ CreateConsole :: proc(rows, cols : u16, conpty_handle : mem.Handle) -> (h : mem.
 	console := Console {
 		rows = rows,
 		cols = cols,
+		pty_rows = rows, // 初始 = ConPTY 创建尺寸(80x24),与传入一致
+		pty_cols = cols,
 		conpty_handle = conpty_handle,
 	}
 	console.vt = VtState {

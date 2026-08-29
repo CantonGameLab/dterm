@@ -67,6 +67,17 @@ Init :: proc(window : ^s3.Window) -> bool {
 	return s3.StartTextInput(window)
 }
 
+// 写剪贴板(OSC 52 落点;SDL 内部拷贝,临时 NUL 结尾缓冲即可)
+SetClipboardText :: proc(data : []byte) -> bool {
+	if len(data) == 0 {
+		return s3.SetClipboardText(cstring("")) // 清剪贴板
+	}
+	buf := make([]byte, len(data) + 1)
+	copy(buf, data)
+	defer delete(buf)
+	return s3.SetClipboardText(cstring(raw_data(buf)))
+}
+
 // 每帧唯一入口:清上一帧边沿(事件泵在 event 模块,先于本模块调用)
 BeginFrame :: proc() {
 	for i in 0 ..< SCANCODE_COUNT {

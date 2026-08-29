@@ -194,6 +194,38 @@ SetSplitFactorLeaf :: proc(n : int, factor : f32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// 字体加载(表满自动回收)
+// ---------------------------------------------------------------------------
+// 引用集 = 全部 Window.font_id(字体唯一真相 = 窗口;console 无副本)。
+// LoadFont 表满时:扫描引用集 → 清一个未被引用的旧档 → 重试。
+
+loadFontEvict :: proc(path : string, size : f32) -> (mem.Handle, bool) {
+	if h, ok := fnt.LoadFont(path, size); ok {
+		return h, true
+	}
+	if !fnt.FontTableFull() {
+		return {}, false // 非表满失败(字号/文件),重试无意义
+	}
+	used : [fnt.MAX_FONT_SLOTS]mem.Handle
+	n := collectUsedFonts(&used)
+	if !fnt.EvictUnused(used[:n]) {
+		return {}, false // 全部在用:无可回收
+	}
+	return fnt.LoadFont(path, size)
+}
+
+collectUsedFonts :: proc(used : ^[fnt.MAX_FONT_SLOTS]mem.Handle) -> int {
+	n := 0
+	for i in 0 ..< MAX_WINDOW_SLOTS {
+		if w := mem.GetIndex(&windows, i); w != nil && w.font_id.id != 0 && n < fnt.MAX_FONT_SLOTS {
+			used[n] = w.font_id
+			n += 1
+		}
+	}
+	return n
+}
+
+// ---------------------------------------------------------------------------
 // 字体
 // ---------------------------------------------------------------------------
 // 设定 id(或焦点)window 的字体样式(加载字体文件;LaunchConsole 前必须设置)。
@@ -209,18 +241,15 @@ SetWindowFont :: proc(path : string, size : f32, id : mem.Handle = {}) -> bool {
 		fmt.eprintln("SWF: no win obj")
 		return false
 	}
-	new_font, ok := fnt.LoadFont(path, size)
+	new_font, ok := loadFontEvict(path, size)
 	if !ok {
 		fmt.eprintln("SWF: LoadFont failed:", path, size)
 		return false
 	}
 	// 字体全局共享(同 path+size 复用 LoadFont 返回同一 handle),
-	// 旧字体不销毁:其他窗口可能仍引用;仅窗口指针指向新字体
+	// 旧字体不销毁:其他窗口可能仍引用;仅窗口指针指向新字体。
+	// 字体唯一真相 = win.font_id(console 读取经窗口,无副本)
 	win.font_id = new_font
-	// 若 console 已存在则立即应用(句柄有效性由 GenArray 判定)
-	if console := GetConsole(win.console_id); console != nil {
-		console.font_id = new_font
-	}
 	return true
 }
 
@@ -239,14 +268,11 @@ SetWindowFontSize :: proc(size : f32, id : mem.Handle = {}) -> bool {
 	if len(path) == 0 {
 		return false
 	}
-	new_font, ok := fnt.LoadFont(path, size)
+	new_font, ok := loadFontEvict(path, size)
 	if !ok {
 		return false
 	}
 	win.font_id = new_font
-	if console := GetConsole(win.console_id); console != nil {
-		console.font_id = new_font
-	}
 	return true
 }
 
@@ -359,8 +385,6 @@ LaunchConsole :: proc(cmd : string, id : mem.Handle = {}) -> bool {
 		ct.DestroyConpty(conpty_h)
 		return false
 	}
-	console := GetConsole(console_h)
-	console.font_id = win.font_id
 	win.console_id = console_h
 	win.auto_close = true // 默认:应用退出即自动关窗;SetAutoClose(false) 可关闭
 	return true

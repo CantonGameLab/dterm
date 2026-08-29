@@ -7,6 +7,7 @@ package canvas
 import ct "../conpty"
 import fnt "../font"
 import inp "../input"
+import mem "../memory"
 import "core:fmt"
 
 // ---------------------------------------------------------------------------
@@ -174,7 +175,7 @@ ProcessMouse :: proc() {
 	}
 	// 应用接管:鼠标事件编码为 SGR 序列写回应用,不再做 UI 动作
 	if console.vt.mouse_mode != 0 {
-		mouseToApp(console)
+		mouseToApp(console, win.font_id)
 		return
 	}
 	// UI 绑定:点击聚焦;滚轮滚动历史(review)
@@ -214,8 +215,9 @@ focusConsole :: proc() -> ^Console {
 // ---------------------------------------------------------------------------
 
 // 鼠标屏幕位置 → 网格坐标(1-based,越界 clamp 到格子边缘,终端惯例)
-mouseCell :: proc(console : ^Console, x, y : f32) -> (col, row : int, ok : bool) {
-	m := fnt.GetMetrics(console.font_id)
+// 字体 = 窗口配置(唯一真相),经调用方传入
+mouseCell :: proc(console : ^Console, font_h : mem.Handle, x, y : f32) -> (col, row : int, ok : bool) {
+	m := fnt.GetMetrics(font_h)
 	if m.cell_width <= 0 || m.cell_height <= 0 {
 		return 0, 0, false
 	}
@@ -250,12 +252,12 @@ sendSGR :: proc(console : ^Console, cb : u8, col, row : int, release : bool) {
 }
 
 // 编码并上报本帧鼠标事件(协议 = SGR 1006;未启用时忽略,旧 X10 编码暂不支持)
-mouseToApp :: proc(console : ^Console) {
+mouseToApp :: proc(console : ^Console, font_h : mem.Handle) {
 	if !console.vt.sgr_mouse {
 		return
 	}
 	m := &inp.Mouse
-	col, row, ok := mouseCell(console, m.x, m.y)
+	col, row, ok := mouseCell(console, font_h, m.x, m.y)
 	if !ok {
 		return
 	}

@@ -153,7 +153,7 @@ drawConsole :: proc(node_h : mem.Handle, theme : Theme) {
 	if console == nil {
 		return
 	}
-	m := fnt.GetMetrics(console.font_id)
+	m := fnt.GetMetrics(win.font_id)
 	if m.cell_width <= 0 || m.cell_height <= 0 {
 		return
 	}
@@ -187,11 +187,11 @@ drawConsole :: proc(node_h : mem.Handle, theme : Theme) {
 		resize(&shaped, col_limit)
 		resize(&orig, col_limit)
 		for c in 0 ..< col_limit {
-			g := fnt.GlyphIndex(console.font_id, line.cells[c].cp)
+			g := fnt.GlyphIndex(win.font_id, line.cells[c].cp)
 			orig[c] = g
 			shaped[c] = g
 		}
-		fnt.ShapeLine(console.font_id, &shaped)
+		fnt.ShapeLine(win.font_id, &shaped)
 
 		// 连体合并(未来 type4)会缩短数组;绘制按缩短后的长度截断
 		draw_limit := min(col_limit, len(shaped))
@@ -224,9 +224,9 @@ drawConsole :: proc(node_h : mem.Handle, theme : Theme) {
 			gid := shaped[c]
 			if gid != 0 && gid != orig[c] {
 				// 连体替换:画替换字形
-				DrawGlyphById(console.font_id, gid, cx, cy + m.ascent, fg)
+				DrawGlyphById(win.font_id, gid, cx, cy + m.ascent, fg)
 			} else {
-				DrawRune(console.font_id, cell.cp, cx, cy + m.ascent, fg)
+				DrawRune(win.font_id, cell.cp, cx, cy + m.ascent, fg)
 			}
 		}
 	}
@@ -263,7 +263,7 @@ drawConsole :: proc(node_h : mem.Handle, theme : Theme) {
 					if int(console.cursor_col) < len(line.cells) {
 						cell := line.cells[int(console.cursor_col)]
 						if cell.cp != 0 {
-							DrawRune(console.font_id, cell.cp, cx, cy + m.ascent, theme.bg)
+							DrawRune(win.font_id, cell.cp, cx, cy + m.ascent, theme.bg)
 						}
 					}
 				}

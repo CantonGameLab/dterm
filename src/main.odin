@@ -47,7 +47,7 @@ initWindows :: proc() -> bool {
 	// 默认配置须在 CreateWindowTreeRoot 之前设置(只对之后创建的窗口生效)
 	canvas.SetDefaultLaunch(
 		"C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start",
-		"consola", 26)
+		"FiraCode Nerd Font Mono", 26)
 
 	// 根窗 0(自动启动默认)
 	root := canvas.CreateWindowTreeRoot()

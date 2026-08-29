@@ -55,6 +55,31 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 
 ## 4. 程序状态(数据结构设计)
 
+### 4.0 主题(配色)数据
+
+参考落地:alacritty(269 索引表 + normal/bright/dim 结构字段)、WT(扁平 20 字段 JSON 配色方案)、kitty(color0-255 展开 + 边框色独立)。dterm 取三方共识与最小集:
+
+```odin
+// src/canvas/theme.odin — 主题数据(唯一写者 = canvas;render 只读)
+// 决策:① CellStyle.fg/bg 用引用编码(主题热切换零缓冲污染)
+//      ② 256 色固定算法(主题只管 0-15 + 默认;覆盖表第二次出现再做)
+//      ③ frame_color 从树节点删除,分割条读主题(节点回到纯结构)
+//      ④ 主题归 canvas:SetTheme/ThemeGet userapi,切换即下一帧生效
+Theme :: struct {
+    fg, bg       : u32,      // 默认前景/背景(SGR 39/49/0 解析目标)
+    cursor       : u32,      // 光标
+    ansi         : [16]u32,  // SGR 索引 0..15:0-7 普通,8-15 亮(顺序 = WT/alacritty/kitty)
+    frame        : u32,      // 分割条
+    focus_border : u32,      // 焦点窗口边框(kitty active_border 对应物)
+}
+
+// CellStyle.fg/bg 颜色引用编码(u32,一键 switch 解码,渲染期 resolve):
+//   0x00RRGGBB           直接 RGB(SGR 38;2;r;g;b)
+//   0x01xxxxxx(低24 = n) 索引色 n:0-15 → theme.ansi[n];16-255 → 固定 cube/灰度算法
+//   0xFFFFFFFF           默认 → theme.fg / theme.bg
+// 解析器(SGR)只做语法 → 编码,零主题依赖;ansi256ToRgb 固定公式随编码一起驻 theme.odin。
+```
+
 ### 4.1 窗口树节点
 
 ```odin
@@ -95,17 +120,19 @@ Iterm :: struct {
 
 ```odin
 Console :: struct {
-    rows, cols : u16,
+    rows, cols : u16,            // 目标网格尺寸(布局趟真源)
+    pty_rows, pty_cols : u16,    // ConPTY 已应用尺寸(尺寸应用趟比较)
     origin_x, origin_y : f32,
     cursor_row, cursor_col : u16,
     vt : VtState,
     term_buffer_ids : [MAX_BUFFERS_PER_CONSOLE]mem.Handle,
     active_term_buffer_id : mem.Handle,
     conpty_handle : mem.Handle,  // 0 = 无后端(工具 console,dterm 自己写内容)
-    font_id : mem.Handle,
     font_size : f32,
 }
 ```
+
+字体唯一真相 = **Window.font_id**(渲染/布局/鼠标换算都经窗口取;Console 无字体副本)。
 
 Cell 当前为文本单元(`cp: rune + style + wide`);rich content 未来经扩展 ANSI 序列进入,Cell 届时扩展为内容判别。
 
@@ -230,7 +257,7 @@ CreateConsole(rows, cols, conpty_handle) -> (h, ok)  // conpty_handle 可 0(工�
 DestroyConsole(h)
 GetConsole(h) -> ^Console
 ConsoleUpdateLayout(h, t, cell_w, cell_h) -> bool  // 每帧:算 cols/rows + 居中取整
-ConsoleUpdateTree(root_h)                          // 遍历树:布局 + Resize + 拉输出
+ConsoleUpdateTree(root_h)                          // 布局(遍历 node 树)→ 尺寸应用 → 输出(遍历 console)
 UpdateConsole(h)                                   // 拉 conpty 环形缓冲喂解析器
 ConsoleFeed(h, data)                               // 注入字节(工具自绘 / 测试 / 指令回显)
 ConsoleSetCursor(h, row, col) -> bool
