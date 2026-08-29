@@ -52,6 +52,7 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 | `userapi.odin` | — | 用户接口函数族(id 省略 = 焦点) |
 | `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数 |
 | `keybindings.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),`initDefaultKeyBindings` 运行时绑定完整默认表(Alt+H/J/K/L 焦点 / Alt+Shift+L/J 分屏 / Ctrl+Shift+H/J/K/L 几何方向交换 / Ctrl+Shift+W 销毁 / PageUp/Down 翻页 / F2 命令栏 / Ctrl+Shift+=/- 字号);鼠标(滚轮/点击/SGR 编码) |
+| `theme.odin` | `Theme` | 主题数据(fg/bg/cursor + 16 ANSI + UI 色);颜色引用编码归属(DEFAULT_COLOR/colorRgb/colorIndex/ResolveColor/ansi256ToRgb 固定公式);SetTheme/ThemeGet |
 
 ## 4. 程序状态(数据结构设计)
 
@@ -71,6 +72,7 @@ Theme :: struct {
     ansi         : [16]u32,  // SGR 索引 0..15:0-7 普通,8-15 亮(顺序 = WT/alacritty/kitty)
     frame        : u32,      // 分割条
     focus_border : u32,      // 焦点窗口边框(kitty active_border 对应物)
+    fps_bg, fps_fg : u32,    // 右上角 FPS tag(渲染层观测数据)
 }
 
 // CellStyle.fg/bg 颜色引用编码(u32,一键 switch 解码,渲染期 resolve):
@@ -88,8 +90,7 @@ WindowTreeNode :: struct {
     console_id : mem.Handle,   // 仅 leaf:主应用 console;0 = 空窗
     iterms : [dynamic]Iterm,   // 管理工具浮层(锚定于本节点几何)
     using transform : Transform, // position_x/y, width/height(像素)
-    frame_width : u32,          // 分割条像素宽
-    frame_color : u32,
+    frame_width : u32,          // 分割条像素宽(颜色读主题 frame)
     parent_id : mem.Handle,     // 0 = 无父(仅根)
     left_son_id : mem.Handle,   // left or up
     right_son_id : mem.Handle,  // right or down

@@ -671,13 +671,8 @@ vtAltScreen :: proc(console_h : mem.Handle, enter : bool) {
 // ---------------------------------------------------------------------------
 // SGR
 // ---------------------------------------------------------------------------
-// xterm 标准 16 色
-ANSI16 : [16]u32 = {
-	0x000000, 0x800000, 0x008000, 0x808000,
-	0x000080, 0x800080, 0x008080, 0xC0C0C0,
-	0x808080, 0xFF0000, 0x00FF00, 0xFFFF00,
-	0x0000FF, 0xFF00FF, 0x00FFFF, 0xFFFFFF,
-}
+// 颜色一律写引用编码(theme.odin):30-37/90-97 → colorIndex(0..15),
+// 38;5 → colorIndex(n),38;2 → RGB,39/49/0 → DEFAULT_COLOR(渲染期按主题解析)。
 
 vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 	console := GetConsole(console_h)
@@ -696,6 +691,7 @@ vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 	for i < len(params) {
 		pp := params[i]
 		switch pp {
+		//TODO
 		case 0:
 			style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR }
 		case 1: style.bold = true
@@ -706,7 +702,7 @@ vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 		case 23: style.italic = false
 		case 24: style.underline = false
 		case 27: style.reverse = false
-		case 30 ..= 37: style.fg = ANSI16[pp - 30]
+		case 30 ..= 37: style.fg = colorIndex(pp - 30)
 		case 38, 48: // 扩展色:分号式 38;2;r;g;b / 38;5;n;冒号式 38:2::r:g:b / 38:5::n
 			if int(p.num_subparams[i]) > 1 {
 				// 冒号式:组内子参 [38, mode, ...];RGB 带 colorspace 槽(cs 非 0 拒绝,
@@ -717,11 +713,11 @@ vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 				switch mode {
 				case 5:
 					n := s[int(p.num_subparams[i]) - 1]
-					color := ansi256ToRgb(int(n))
+					color := colorIndex(int(n))
 					if pp == 38 { style.fg = color } else { style.bg = color }
 				case 2:
 					if p.num_subparams[i] == 6 && s[2] == 0 {
-						color := (u32(s[3]) << 16) | (u32(s[4]) << 8) | u32(s[5])
+						color := colorRgb((u32(s[3]) << 16) | (u32(s[4]) << 8) | u32(s[5]))
 						if pp == 38 { style.fg = color } else { style.bg = color }
 					}
 				}
@@ -729,46 +725,27 @@ vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 				// 分号式:38 后的组 = mode;值取后续组(RGB 限 < 256 与 WT/xterm 一致)
 				mode := params[i + 1]
 				if mode == 5 && i + 2 < len(params) {
-					color := ansi256ToRgb(params[i + 2])
+					color := colorIndex(int(params[i + 2]))
 					if pp == 38 { style.fg = color } else { style.bg = color }
 					i += 2
 				} else if mode == 2 && i + 4 < len(params) {
 					r, g, b := params[i + 2], params[i + 3], params[i + 4]
 					if r <= 255 && g <= 255 && b <= 255 {
-						color := (u32(r) << 16) | (u32(g) << 8) | u32(b)
+						color := colorRgb((u32(r) << 16) | (u32(g) << 8) | u32(b))
 						if pp == 38 { style.fg = color } else { style.bg = color }
 					}
 					i += 4
 				}
 			}
 		case 39: style.fg = DEFAULT_COLOR
-		case 40 ..= 47: style.bg = ANSI16[pp - 40]
+		case 40 ..= 47: style.bg = colorIndex(pp - 40)
 		case 49: style.bg = DEFAULT_COLOR
-		case 90 ..= 97: style.fg = ANSI16[pp - 90 + 8]
-		case 100 ..= 107: style.bg = ANSI16[pp - 100 + 8]
+		case 90 ..= 97: style.fg = colorIndex(pp - 90 + 8)
+		case 100 ..= 107: style.bg = colorIndex(pp - 100 + 8)
 		}
 		i += 1
 	}
 	vt.style = style
-}
-
-ansi256ToRgb :: proc(n : int) -> u32 {
-	if n < 16 {
-		return ANSI16[n]
-	}
-	if n < 232 {
-		n := n - 16
-		r := ansiCubeLevel(n / 36)
-		g := ansiCubeLevel((n % 36) / 6)
-		b := ansiCubeLevel(n % 6)
-		return (r << 16) | (g << 8) | b
-	}
-	v := 8 + (n - 232) * 10
-	return u32(v) * 0x010101
-}
-
-ansiCubeLevel :: proc(v : int) -> u32 {
-	return u32(v == 0 ? 0 : 55 + v * 40)
 }
 
 // 光标屏幕位置(0-based):物理行 - 可视区顶部(历史 + review 滚动)

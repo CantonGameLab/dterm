@@ -13,8 +13,7 @@ import "core:fmt"
 //   渲染契约:visible_top = viewportTop(console, tb)  // 普通 = 贴底;review = 锚定 review_line
 //            屏幕第 r 行 ↔ lines[visible_top + r];光标屏幕位置 = cursor_row - visible_top
 //            第 r 行第 c 列格子左上角像素 = (origin_x + c*cell_w, origin_y + r*cell_h);cell 来自 font 度量
-// 0xFFFFFFFF = 渲染时查主题色
-DEFAULT_COLOR :: 0xFFFF_FFFF
+// 颜色编码(DEFAULT_COLOR/colorRgb/colorIndex)见 theme.odin
 
 CellStyle :: struct {
 	fg, bg : u32,

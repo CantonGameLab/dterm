@@ -32,8 +32,7 @@ WindowTreeNode :: struct {
 
 	using transform : Transform,
 
-	frame_width : u32, // 分割条像素宽
-	frame_color : u32,
+	frame_width : u32, // 分割条像素宽(颜色读主题 theme.frame)
 
 	parent_id : mem.Handle, // 0 = 无父(仅根)
 
@@ -54,9 +53,7 @@ Window_Width : u32 = 1920
 
 Window_Height : u32 = 1080
 
-// 分割条默认样式:明黄色,3 像素宽
-DEFAULT_FRAME_COLOR :: 0xFFFF00
-
+// 分割条默认样式:1 像素宽(颜色读主题)
 DEFAULT_FRAME_WIDTH :: 1
 
 // 当前聚焦的 window(leaf);0 = 无。全局唯一。
@@ -66,7 +63,6 @@ InitWindowTree :: proc() {
 	mem.AllocAt(&window_tree_nodes, ROOT_WINDOW_TREE_NODE_ID, WindowTreeNode {
 		is_leaf = true,
 		frame_width = DEFAULT_FRAME_WIDTH,
-		frame_color = DEFAULT_FRAME_COLOR,
 		width = f32(Window_Width),
 		height = f32(Window_Height),
 	})
@@ -76,7 +72,6 @@ CreateWindowTreeNode :: proc() -> (h : mem.Handle) {
 	return mem.Alloc(&window_tree_nodes, WindowTreeNode {
 		is_leaf = true,
 		frame_width = DEFAULT_FRAME_WIDTH,
-		frame_color = DEFAULT_FRAME_COLOR,
 	})
 }
 
@@ -288,7 +283,6 @@ TreeNodeSplit :: proc(h : mem.Handle, split_type : SplitType, factor : f32) -> (
 	np.split_type = split_type
 	np.split_factor = max(0.05, min(0.95, factor))
 	np.frame_width = node.frame_width
-	np.frame_color = node.frame_color
 	np.position_x = node.position_x // 几何继承 id 原区域,子区域由布局重算
 	np.position_y = node.position_y
 	np.width = node.width

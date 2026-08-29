@@ -25,7 +25,7 @@ main :: proc() {
 		return
 	}
 
-	theme := render.Theme { fg = 0xDCDCDC, bg = 0x1E1E1E, cursor = 0xFFFFFF, focus_border = 0x4FC3F7 }
+	// 主题:Dracula(换主题只改这一行;默认 = canvas.DEFAULT_THEME)
 
 	for {
 		input.BeginFrame() // 清上一帧边沿(事件泵先于本模块调用)
@@ -37,7 +37,7 @@ main :: proc() {
 			fmt.println("all windows closed")
 			break
 		}
-		render.Update(theme)
+		render.Update()
 	}
 }
 
@@ -45,14 +45,18 @@ main :: proc() {
 initWindows :: proc() -> bool {
 	// 默认启动:新建窗口自动 设 consola 26 → 启动 msys2 bash;
 	// 默认配置须在 CreateWindowTreeRoot 之前设置(只对之后创建的窗口生效)
-	canvas.SetDefaultLaunch(
-		"C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start",
-		"FiraCode Nerd Font Mono", 26)
+	//canvas.SetDefaultLaunch(
+	//	"C:\\msys64\\msys2_shell.cmd -ucrt64 -defterm -here -full-path -no-start",
+	//	"FiraCode Nerd Font Mono", 26)
 
+	canvas.SetDefaultLaunch(
+		"cmd.exe",
+		"FiraCode Nerd Font Mono", 26)
 	// 根窗 0(自动启动默认)
 	root := canvas.CreateWindowTreeRoot()
 	if root.id == 0 {
 		return false
 	}
+	canvas.SetTheme(canvas.DRACULA_THEME)
 	return true
 }

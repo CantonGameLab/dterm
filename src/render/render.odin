@@ -64,7 +64,7 @@ Vertex :: struct {
 	r, g, b, a : f32,
 }
 
-MAX_QUADS :: 4096
+MAX_QUADS :: 16384 // 满屏格子(~120x40x2)不中途 flush;顶点静态 3MB
 quad_verts : [MAX_QUADS * 6]Vertex
 quad_count : int
 current_tex : u32
@@ -116,7 +116,7 @@ Init :: proc() -> bool {
 		}
 	)
 
-	s3.GL_SetSwapInterval(1)
+	s3.GL_SetSwapInterval(0) // 关垂直同步:帧率 = 真实渲染上限(性能观测用)
 
 	program = linkProgram(compileShader(gl.VERTEX_SHADER, VERT_SRC), compileShader(gl.FRAGMENT_SHADER, FRAG_SRC))
 	if program == 0 {
@@ -126,6 +126,7 @@ Init :: proc() -> bool {
 	initBatch()
 	initWhiteTexture()
 	UiInit() // UI 层(nanovg);失败则 UI 禁用,不影响主渲染
+	fps_font, _ = fnt.LoadFont("consola", 18) // FPS tag 字体;失败 = 不显示
 	return true
 }
 
@@ -158,9 +159,9 @@ GetWindow :: proc() -> ^s3.Window {
 // ---------------------------------------------------------------------------
 
 
-Update :: proc(theme : Theme) {
+Update :: proc() {
 	BeginFrame()
-	DrawFrame(theme)
+	DrawFrame()
 	EndFrame()
 }
 
@@ -192,9 +193,9 @@ EndFrame :: proc() {
 
 // 整帧唯一入口(DAG 末端:只读 canvas/font → 屏幕):Begin → 场景 → End。
 // UI 悬浮层(scene 内部按需 Begin/End nanovg)与主批 flush 都由它收口。
-Draw :: proc(theme : Theme) {
+Draw :: proc() {
 	BeginFrame()
-	DrawFrame(theme)
+	DrawFrame()
 	EndFrame()
 }
 
