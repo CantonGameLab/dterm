@@ -10,6 +10,8 @@ import mem "../memory"
 import "core:c"
 import "core:fmt"
 import "core:math"
+import "core:os"
+import "core:strings"
 
 INIT_WINDOW_WIDTH :: 1920
 INIT_WINDOW_HEIGHT :: 1080
@@ -20,39 +22,25 @@ gl_context : s3.GLContext
 screen_w, screen_h : f32
 
 // ---------------------------------------------------------------------------
-// 着色器
+// 着色器(源码外置 resource/shader/:main.vert / main.frag / background.frag)
 // ---------------------------------------------------------------------------
 
-VERT_SRC :: `
-#version 440 core
-layout(location = 0) in vec2 aPos;
-layout(location = 1) in vec2 aUv;
-layout(location = 2) in vec4 aColor;
-uniform vec2 uScreenSize;
-out vec2 vUv;
-out vec4 vColor;
-void main() {
-    vUv = aUv;
-    vColor = aColor;
-    vec2 ndc = vec2(aPos.x / uScreenSize.x * 2.0 - 1.0, 1.0 - aPos.y / uScreenSize.y * 2.0);
-    gl_Position = vec4(ndc, 0.0, 1.0);
-}
-`
-
-FRAG_SRC :: `
-#version 440 core
-in vec2 vUv;
-in vec4 vColor;
-uniform sampler2D uTex;
-out vec4 fragColor;
-void main() {
-    // 图集为 R8 灰度:灰度值作 alpha,颜色纯由顶点色给出
-    fragColor = vec4(vColor.rgb, vColor.a * texture(uTex, vUv).r);
-}
-`
-
 program : u32
+main_vs : u32 // 主/背景 pass 共用顶点 shader(main.vert)
 u_screen_size : i32
+
+// 读文件 + 编译 shader(失败 = 0;路径相对工作目录 = src.exe 所在)
+loadShader :: proc(path : string, kind : u32) -> u32 {
+	data, err := os.read_entire_file_from_path(path, context.allocator)
+	if err != nil {
+		fmt.eprintln("shader file missing:", path)
+		return 0
+	}
+	defer delete(data)
+	cs := strings.clone_to_cstring(string(data))
+	defer delete(cs)
+	return compileShader(kind, cs)
+}
 
 // ---------------------------------------------------------------------------
 // 四边形批量:同纹理的四边形攒一批,一次 draw call
@@ -116,9 +104,11 @@ Init :: proc() -> bool {
 		}
 	)
 
-	s3.GL_SetSwapInterval(0) // 关垂直同步:帧率 = 真实渲染上限(性能观测用)
+	s3.GL_SetSwapInterval(0) // 初始 = 关 vsync(性能观测用);SetVSync 切换
 
-	program = linkProgram(compileShader(gl.VERTEX_SHADER, VERT_SRC), compileShader(gl.FRAGMENT_SHADER, FRAG_SRC))
+	main_vs = loadShader("resource/shader/main.vert", gl.VERTEX_SHADER)
+	main_fs := loadShader("resource/shader/main.frag", gl.FRAGMENT_SHADER)
+	program = linkProgram(main_vs, main_fs)
 	if program == 0 {
 		return false
 	}
@@ -127,12 +117,15 @@ Init :: proc() -> bool {
 	initWhiteTexture()
 	UiInit() // UI 层(nanovg);失败则 UI 禁用,不影响主渲染
 	fps_font, _ = fnt.LoadFont("consola", 18) // FPS tag 字体;失败 = 不显示
+	InitBackgroundShader() // 读 resource/shader/background.frag(可先用 SetBackgroundShader 自愈)
 	return true
 }
 
 Quit :: proc() {
 	UiQuit()
+	BackgroundShaderQuit()
 	gl.DeleteProgram(program)
+	gl.DeleteShader(main_vs)
 	gl.DeleteBuffers(1, &vbo)
 	gl.DeleteVertexArrays(1, &vao)
 	gl.DeleteTextures(1, &white_tex)
@@ -155,13 +148,27 @@ GetWindow :: proc() -> ^s3.Window {
 }
 
 // ---------------------------------------------------------------------------
+// 垂直同步开关(默认关:帧率 = 真实渲染上限,性能观测;开 = 跟随刷新率)
+// ---------------------------------------------------------------------------
+vsync_on : bool
+
+SetVSync :: proc(on : bool) {
+	vsync_on = on
+	s3.GL_SetSwapInterval(i32(on)) // 0 = 关(交换不等待),1 = 开(垂直同步)
+}
+
+VSyncEnabled :: proc() -> bool {
+	return vsync_on
+}
+
+// ---------------------------------------------------------------------------
 // 帧
 // ---------------------------------------------------------------------------
 
 
 Update :: proc() {
 	BeginFrame()
-	DrawFrame()
+	DrawFrame() // 内含背景 pass(scene 层统一帧序)
 	EndFrame()
 }
 
@@ -174,6 +181,7 @@ BeginFrame :: proc() {
 	gl.Clear(gl.COLOR_BUFFER_BIT)
 
 	quad_count = 0
+	bg_quad_count = 0
 	current_tex = 0
 
 	// 主渲染状态(上一帧 nanovg flush 可能改动 blend/状态,这里重置)
@@ -195,7 +203,7 @@ EndFrame :: proc() {
 // UI 悬浮层(scene 内部按需 Begin/End nanovg)与主批 flush 都由它收口。
 Draw :: proc() {
 	BeginFrame()
-	DrawFrame()
+	DrawFrame() // 内含背景 pass(scene 层统一帧序)
 	EndFrame()
 }
 
@@ -203,9 +211,19 @@ Draw :: proc() {
 // 绘制
 // ---------------------------------------------------------------------------
 
-// 实心矩形,color = 0xRRGGBB
+// 实心矩形,color = 0xRRGGBB(前景/UI 用:字形、分割条、焦点边框、FPS 等)
 DrawRect :: proc(x, y, w, h : f32, color : u32) {
 	pushQuad(white_tex, x, y, x + w, y + h, 0, 0, 1, 1, color)
+}
+
+// 终端背景矩形(打底 / cell 底色):开关 off = 直接屏(主批);
+// on = 进背景批(帧末 → FBO → 背景 shader → 屏幕),字形不受影响
+DrawRectBg :: proc(x, y, w, h : f32, color : u32) {
+	if bg_enabled {
+		pushBgQuad(x, y, x + w, y + h, color)
+	} else {
+		pushQuad(white_tex, x, y, x + w, y + h, 0, 0, 1, 1, color)
+	}
 }
 
 // 单字形,(x, y) = 基线位置;返回前进宽,无字形时按格宽
@@ -255,22 +273,38 @@ pushQuad :: proc(tex : u32, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32) {
 	if quad_count >= MAX_QUADS {
 		flushBatch()
 	}
-	// 坐标取整对齐像素网格:字形位图内容已含亚像素偏移(sub_x 相位补偿),
-	// 四舍五入后 1:1 采样清晰,且字形回到设计位置(floor 会整体左移 1px,
-	// 让贴格子边缘的圆角字符相对高亮背景错位)
+	writeQuad(&quad_verts, quad_count, x0, y0, x1, y1, u0, v0, u1, v1, color)
+	quad_count += 1
+}
+
+// 背景批(固定白纹,纯色矩形;批满自动上屏到 FBO)
+bg_quad_verts : [MAX_QUADS * 6]Vertex
+bg_quad_count : int
+
+pushBgQuad :: proc(x0, y0, x1, y1 : f32, color : u32) {
+	if bg_quad_count >= MAX_QUADS {
+		flushBgBatch()
+	}
+	writeQuad(&bg_quad_verts, bg_quad_count, x0, y0, x1, y1, 0, 0, 1, 1, color)
+	bg_quad_count += 1
+}
+
+// 顶点写入(主批/背景批共用;坐标取整对齐像素网格:字形位图内容已含亚像素偏移
+// (sub_x 相位补偿),四舍五入后 1:1 采样清晰,且字形回到设计位置(floor 会整体
+// 左移 1px,让贴格子边缘的圆角字符相对高亮背景错位)
+writeQuad :: proc(verts : ^[MAX_QUADS * 6]Vertex, q : int, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32) {
 	fx0, fy0 := math.round(x0), math.round(y0)
 	fx1, fy1 := math.round(x1), math.round(y1)
 	r := f32(color >> 16 & 0xFF) / 255
 	g := f32(color >> 8 & 0xFF) / 255
 	b := f32(color & 0xFF) / 255
-	base := quad_count * 6
-	quad_verts[base + 0] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
-	quad_verts[base + 1] = Vertex { fx1, fy0, u1, v0, r, g, b, 1 }
-	quad_verts[base + 2] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
-	quad_verts[base + 3] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
-	quad_verts[base + 4] = Vertex { fx0, fy1, u0, v1, r, g, b, 1 }
-	quad_verts[base + 5] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
-	quad_count += 1
+	base := q * 6
+	verts[base + 0] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
+	verts[base + 1] = Vertex { fx1, fy0, u1, v0, r, g, b, 1 }
+	verts[base + 2] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
+	verts[base + 3] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
+	verts[base + 4] = Vertex { fx0, fy1, u0, v1, r, g, b, 1 }
+	verts[base + 5] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
 }
 
 flushBatch :: proc() {
@@ -284,6 +318,20 @@ flushBatch :: proc() {
 	gl.BufferData(gl.ARRAY_BUFFER, int(quad_count * 6 * size_of(Vertex)), raw_data(quad_verts[:quad_count * 6]), gl.DYNAMIC_DRAW)
 	gl.DrawArrays(gl.TRIANGLES, 0, i32(quad_count * 6))
 	quad_count = 0
+}
+
+// 背景批上屏(FBO 已绑定 + 清屏后调用;白纹 + 主 program/VAO)
+flushBgBatch :: proc() {
+	if bg_quad_count == 0 {
+		return
+	}
+	gl.UseProgram(program)
+	gl.BindVertexArray(vao)
+	gl.BindBuffer(gl.ARRAY_BUFFER, vbo)
+	gl.BindTexture(gl.TEXTURE_2D, white_tex)
+	gl.BufferData(gl.ARRAY_BUFFER, int(bg_quad_count * 6 * size_of(Vertex)), raw_data(bg_quad_verts[:bg_quad_count * 6]), gl.DYNAMIC_DRAW)
+	gl.DrawArrays(gl.TRIANGLES, 0, i32(bg_quad_count * 6))
+	bg_quad_count = 0
 }
 
 // 公开:供场景层在 UI 绘制前把攒的终端 quad 先上屏

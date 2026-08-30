@@ -10,8 +10,13 @@ import "core:fmt"
 import "core:time"
 
 // 每帧绘制入口:只读遍历窗口树(主题经 cv.ThemeGet 只读消费)
+// 两趟遍历:先背景(第 1 趟)→ 背景 pass(FBO+shader)→ 字形/前景(第 2 趟)。
+// 原因:主批 push 阶段会因纹理切换提前 flush,若字形先于背景 pass 上屏会被全屏
+// quad 覆盖;分开两趟保证"背景先定、字形后画"。
 DrawFrame :: proc() {
-	drawWalk(cv.WindowTreeRoot())
+	drawWalk(cv.WindowTreeRoot(), true)
+	drawBackgroundPass(f32(s3.GetTicks()) / 1000.0) // 背景批 → FBO → shader(开关 on)
+	drawWalk(cv.WindowTreeRoot(), false)
 	drawFocusBorder() // 焦点描边:画在所有内容与分割条之上
 	drawFps() // 右上角 FPS tag(观测数据,渲染层自身统计)
 	// 终端内容先上屏(flush 攒的 quad),否则 nano vulg 会画在终端之下
@@ -133,21 +138,23 @@ mixColor :: proc(a, b : u32, t : f32) -> u32 {
 	return cr << 16 | cg << 8 | cb
 }
 
-drawWalk :: proc(node_h : mem.Handle) {
+drawWalk :: proc(node_h : mem.Handle, bg : bool) {
 	node := cv.GetWindowTreeNode(node_h)
 	if node == nil {
 		return
 	}
 	if !node.is_leaf {
-		// 先画子树(背景被 frame 覆盖),再画分割条
-		drawWalk(node.left_son_id)
-		drawWalk(node.right_son_id)
-		drawFrame(node_h)
+		// 先画子树(背景被 frame 覆盖),再画分割条(分割条属前景,仅第 2 趟)
+		drawWalk(node.left_son_id, bg)
+		drawWalk(node.right_son_id, bg)
+		if !bg {
+			drawFrame(node_h)
+		}
 		return
 	}
 	win := cv.NodeWindow(node_h)
 	if win != nil {
-		drawConsole(node_h) // 内部按 console 句柄判定,无 console 直返
+		drawConsole(node_h, bg) // 内部按 console 句柄判定,无 console 直返
 	}
 }
 
@@ -176,7 +183,7 @@ drawFrame :: proc(node_h : mem.Handle) {
 	}
 }
 
-drawConsole :: proc(node_h : mem.Handle) {
+drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 	theme := cv.ThemeGet()
 	node := cv.GetWindowTreeNode(node_h)
 	if node == nil {
@@ -196,8 +203,10 @@ drawConsole :: proc(node_h : mem.Handle) {
 	}
 	t := cv.NodeContentTransform(node_h)
 
-	// 打底背景
-	DrawRect(t.position_x, t.position_y, t.width, t.height, theme.bg)
+	// 打底背景(仅第 1 趟:背景批 → FBO → 背景 shader)
+	if bg {
+		DrawRectBg(t.position_x, t.position_y, t.width, t.height, theme.bg)
+	}
 
 	tb := cv.GetTermBuffer(console.active_term_buffer_id)
 	if tb == nil {
@@ -213,6 +222,9 @@ drawConsole :: proc(node_h : mem.Handle) {
 		}
 		line := &tb.lines[line_idx]
 		col_limit := min(int(console.cols), len(line.cells))
+		if col_limit == 0 {
+			continue
+		}
 
 		// 逐行连体 shaping:cell cp → 主字体 glyph id,ShapeLine 原地替换
 		// 输出与输入一一对应,替换后的 id 用 GetGlyphById 绘制
@@ -227,21 +239,24 @@ drawConsole :: proc(node_h : mem.Handle) {
 
 		// 连体合并(未来 type4)会缩短数组;绘制按缩短后的长度截断
 		draw_limit := min(col_limit, len(draw_shaped))
-		// 两遍绘制:先全部背景,再全部字形。
-		// 连体字形位图会溢出到相邻格(如 --- 的 32px 连体),若逐格"背景+字形"交替,
-		// 后格的背景矩形会盖住前格连体字形的溢出部分(高亮选中行尤其明显)。
-		for c in 0 ..< draw_limit {
-			cell := line.cells[c]
-			bg := cv.ResolveColor(cell.bg, theme.bg)
-			if cell.reverse {
-				bg = cv.ResolveColor(cell.fg, theme.fg)
+		if bg {
+			// 第 1 趟:只画背景(打底/cell 底色 → 背景批)
+			for c in 0 ..< draw_limit {
+				cell := line.cells[c]
+				bg_c := cv.ResolveColor(cell.bg, theme.bg)
+				if cell.reverse {
+					bg_c = cv.ResolveColor(cell.fg, theme.fg)
+				}
+				if bg_c != theme.bg {
+					cx := console.origin_x + f32(c) * m.cell_width
+					cy := console.origin_y + f32(r) * m.cell_height
+					DrawRectBg(cx, cy, m.cell_width, m.cell_height, bg_c)
+				}
 			}
-			if bg != theme.bg {
-				cx := console.origin_x + f32(c) * m.cell_width
-				cy := console.origin_y + f32(r) * m.cell_height
-				DrawRect(cx, cy, m.cell_width, m.cell_height, bg)
-			}
+			continue
 		}
+		// 第 2 趟:连体字形位图会溢出到相邻格(如 --- 的 32px 连体),
+		// 背景已在上趟定稿,此处只画字形。
 		for c in 0 ..< draw_limit {
 			cell := line.cells[c]
 			if cell.cp == 0 {
@@ -260,7 +275,7 @@ drawConsole :: proc(node_h : mem.Handle) {
 
 	// 光标(DECSCUSR):0/1 块(闪烁) 2 块 3/4 下划线 5/6 竖线。
 	// 闪烁样式按 500ms 相位亮/灭;块状先画块再用底色重绘字形,条形不遮字形无需重绘。
-	if console.vt.cursor_visible && cursorBlinkOn(console.vt.cursor_style) {
+	if !bg && console.vt.cursor_visible && cursorBlinkOn(console.vt.cursor_style) {
 		cr := int(console.cursor_row) - visible_top
 		if cr >= 0 && cr < int(console.rows) {
 			cx := console.origin_x + f32(console.cursor_col) * m.cell_width

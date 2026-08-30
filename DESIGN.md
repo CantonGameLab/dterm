@@ -49,9 +49,9 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 | `buffer.odin` | `Cell`/`CellStyle`/`Line`/`TermBuffer` | 内容层生命周期 + **全部写路径**(落格/折行/滚动/擦除/裁剪)+ `review_line` 真值 |
 | `console.odin` | `Console` | 视口生命周期 + 布局(居中/`viewportTop`/review 锚定) |
 | `vt.odin` | `VtState` | VT 语法语义分派(ESC/CSI/SGR/DEC 模式)+ 应答 |
-| `userapi.odin` | — | 用户接口函数族(id 省略 = 焦点) |
+| `userapi.odin` | —(用户接口状态) | 用户接口函数族(id 省略 = 焦点)+ 默认启动配置(`default_cmd/font`)+ 绑定表管理(SetKeyBinding/ClearKeyBindings/UnsetKeyBinding/GetKeyBinding)+ 主题切换(SetTheme/ThemeGet)+ 叶子序 factor(SetSplitFactorLeaf) |
 | `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数(含 bind/unbind/bindings 键位配置命令;bind <mods+key> "<命令字符串>") |
-| `keybindings.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),`initDefaultKeyBindings` 运行时绑定完整默认表(Alt+H/J/K/L 焦点 / Alt+Shift+L/J 分屏 / Ctrl+Shift+H/J/K/L 几何方向交换 / Ctrl+Shift+W 销毁 / PageUp/Down 翻页 / F2 命令栏 / Ctrl+Shift+=/- 字号);鼠标(滚轮/点击/SGR 编码) |
+| `keybindings.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),`InitDefaultKeyBindings` 经 userapi 填表(Alt+H/J/K/L 焦点 / Alt+Shift+L/J 分屏 / Ctrl+Shift+H/J/K/L 几何方向交换 / Ctrl+Shift+W 销毁 / **Shift+PageUp/Down 翻页** / F2 命令栏 / Ctrl+Shift+=/- 字号;增改走 SetKeyBinding);鼠标(滚轮/点击/SGR 编码) |
 | `theme.odin` | `Theme` | 主题数据(fg/bg/cursor + 16 ANSI + UI 色);颜色引用编码归属(DEFAULT_COLOR/colorRgb/colorIndex/ResolveColor/ansi256ToRgb 固定公式);SetTheme/ThemeGet |
 
 ## 4. 程序状态(数据结构设计)
@@ -148,7 +148,7 @@ focused_iterm : i32        // -1 = 焦点在主应用;>=0 = iterms 下标
 
 - `ConptyContext`:hpc / 管道 / 进程信息 / Job Object(进程树跟踪 + KILL_ON_JOB_CLOSE 清理)。
 - `Font`:faces / GSUB / 图集 / shape 缓存。
-- `Theme`:fg / bg / cursor(渲染层每帧传入)。
+- `Theme`:canvas 数据(唯一写者;见 4.0),渲染层每帧 `ThemeGet` 只读消费。
 
 ## 5. 接口分层:模块接口与用户接口
 
@@ -181,11 +181,20 @@ focused_iterm : i32        // -1 = 焦点在主应用;>=0 = iterms 下标
 | `focus` | `<id\|left\|right\|up\|down>` | 聚焦指定窗口(按 id 或方向导航) |
 | `destroy` | `[@id]` | 关闭窗口及其 console 应用,从树摘除 |
 | `factor` | `<ratio> [@id]` | 设置窗口**父节点** split_factor(0.05..0.95) |
+| `factorleaf` | `<n> <ratio>` | 设置**先序叶子序号 n(1-based)认领的** split 节点 factor;认领覆盖全部 split(见 5.1 ComputeLeafOrder),最右叶无认领 = 失败 |
 | `exchange` | `<left\|right\|up\|down> [@id]` | 与方向邻居**交换窗口内容**(只换 window_id,树结构不变) |
 | `font` | `"<path>" <size> [@id]` | 设置窗口字体文件与字号 |
+| `fontsize` | `<size> [@id]` | 改字号(保留字体文件) |
+| `fontsizeup` / `fontsizedown` | `[@id]` | 字号 ±2(绑定动作的字符串形式) |
+| `scroll` | `<lines> [@id]` | 历史滚动:正=向下(新),负=向上(旧,进 review) |
+| `reviewup` / `reviewdown` | `[@id]` | 上/下翻一屏历史(绑定动作的字符串形式) |
 | `launch` | `"<cmd>" [@id]` | 用窗口已配置的字体启动 console 应用(需先 `font`) |
 | `feed` | `"<text>" [@id]` | 向窗口 console 写入输入序列 |
 | `autoclose` | `<true\|false> [@id]` | 设置应用退出后是否自动关闭窗口(默认 true) |
+| `bind` | `<mods+key> "<命令字符串>"` | 绑定键位:mods 前缀 alt/ctrl/shift/win 以 `+` 连键名(大小写不敏感,如 `f2`/`alt+shift+l`);目标命令经**同一解析器**二次解析(子命令 = 分代句柄,禁止嵌套 bind) |
+| `unbind` | `<mods+key>` | 移除绑定(不存在 = 失败) |
+| `bindings` | - | 枚举全部绑定(输出格式可再 bind) |
+| `toggle-commandbar` / `togglebar` | - | 悬浮控制台开关(绑定动作的字符串形式) |
 | `count` / `windows` | - | 查询窗口数量(经 UI 输出) |
 | `focus-get` / `getfocus` | - | 查询当前焦点窗口 id(经 UI 输出) |
 
@@ -196,11 +205,19 @@ split down 0.4         # 向下分裂,上(原窗)占 40%
 focus 3                # 聚焦 id=3 的窗口
 focus left             # 焦点向左导航
 factor 0.6             # 焦点窗父节点比例 0.6
+factorleaf 2 0.7       # 第 2 个叶子认领的 split → 0.7
 exchange right         # 与右侧邻居交换内容
 font "./f.ttf" 18      # 焦点窗字体 Cascadia 18
+fontsize 20            # 改字号
+fontsizeup             # 绑定动作的字符串形式
+scroll -10             # 历史向上翻 10 行(review)
+reviewup               # 上翻一屏
 launch "cmd.exe"       # 启动 cmd(需先设字体)
 destroy @3             # 关闭窗口 3
 autoclose false        # 应用退出后保留窗口
+bind alt+shift+l "split right"   # 绑定:Alt+Shift+L → 右分屏
+unbind f2              # 移除 F2 绑定
+bindings               # 枚举全部绑定
 count                  # 窗口数量
 ```
 
@@ -216,6 +233,7 @@ count                  # 窗口数量
 | `SplitNewWindow` | `(dir : SplitType, id = {}) -> mem.Handle` | 分裂新窗,焦点移到新窗 |
 | `DestroyWindow` | `(id = {}) -> bool` | 关应用+会话+树摘除;唯一剩余窗口清空整树 |
 | `SetSplitFactor` | `(factor : f32, id = {}) -> bool` | 设父节点比例 |
+| `SetSplitFactorLeaf` | `(n : int, factor : f32) -> bool` | 设先序叶子序号 n(1-based)认领的 split 比例;认领覆盖全部 split,无认领(最右叶)/越界 = false |
 | `ExchangeWindow` | `(dir : FocusDirection, id = {}) -> bool` | 与方向邻居交换 window_id |
 | `SetWindowFont` | `(path : string, size : f32, id = {}) -> bool` | 设窗口字体(无窗则自动创建) |
 | `SetDefaultLaunch` | `(cmd, font : string, size : f32)` | 默认启动配置:之后新建窗口(CreateWindowTreeRoot/SplitNewWindow)自动先设字体再启动;cmd/font 留空 = 对应项不自动应用(cmd 空 = 窗口不启动)。已有窗口不追溯 |
@@ -233,6 +251,13 @@ count                  # 窗口数量
 | `FocusMove` | `(dir : FocusDirection, id = {}) -> bool` | 方向导航设焦点 |
 | `GetFocusWindow` | `() -> mem.Handle` | 查询焦点 |
 | `WindowCount` | `() -> int` | 查询窗口数 |
+| `SetTheme` | `(t : Theme)` | 切换主题:下一帧渲染全按新表解码(缓冲零重写) |
+| `ThemeGet` | `() -> Theme` | 查询当前主题(值语义) |
+| `InitDefaultKeyBindings` | `()` | 填充完整默认绑定表(经 SetKeyBinding;幂等 = 清空重建);main.initWindows 调用一次 |
+| `SetKeyBinding` | `(key : inp.Scancode, mods : KeyMods, cmd : ParsedCommand) -> bool` | 添加/覆盖一条绑定(同 key+mods 覆盖);表满(32)false |
+| `ClearKeyBindings` | `()` | 清空绑定表(重复初始化 = 清零重建,无状态判定) |
+| `UnsetKeyBinding` | `(key : inp.Scancode, mods : KeyMods) -> bool` | 移除一条绑定(不存在 = false;交换删除,顺序无关) |
+| `GetKeyBinding` | `(key : inp.Scancode, mods : KeyMods) -> (Binding, bool)` | 按 (key, mods) 查询 |
 
 ### 5.1 模块接口(内部,操作级)
 
@@ -249,6 +274,9 @@ TreeNodeSetSplitFactor(h, factor) -> bool          // 内部节点比例 0.05..0
 TreeNodeSetSplitType(h, split_type) -> bool        // 内部节点方向
 TreeNodeSetLeftSon / TreeNodeSetRightSon(h, son) -> bool  // 手动挂子(含环检测)
 RecalculateTransforms(h)                           // 递归重算子树几何
+ComputeLeafOrder()                                 // 先序叶子序 + split 认领匹配(冷路径,结果表
+                                                   // leaf_order/leaf_split_owner;满二叉树 leaf = split+1,
+                                                   // 每个 split 被唯一叶子认领 = 其左子树最右叶,最右叶无认领)
 ```
 
 ### 5.2 Console
@@ -315,8 +343,17 @@ GetAtlasTexture(h) / ShapeLine(h, ^[dynamic]u16)
 // render
 Init / Quit / GetWindowSize / GetWindow
 BeginFrame / EndFrame
-DrawRect / DrawRune / DrawGlyphById / DrawText
-DrawFrame(theme)
+DrawRect / DrawRune / DrawGlyphById / DrawText / DrawRectBg
+DrawFrame()                                  // 无参:两趟遍历(背景趟 → 背景 pass → 字形趟)
+// 背景可编程 shader(源码外置 resource/shader/:main.vert / main.frag / background.frag)
+InitBackgroundShader() -> bool               // 读 background.frag 编译(缺文件 = 背景 pass 不可用)
+SetBackgroundShader(src) -> bool             // 运行时替换(完整 GLSL;编译失败保留旧)
+ResetBackgroundShader() -> bool              // 重读默认文件(热重载)
+SetBackgroundShaderEnabled(on)               // 开关:off = 背景矩形直接屏幕(传统路径)
+BackgroundShaderEnabled() -> bool
+// 背景语义:theme 打底 + 全部 cell 底色先渲染到 RGBA8 纹理(uBg),经用户片段 shader 变换
+// 输出;字形/光标/UI 不受影响。帧序:第 1 趟画背景 → 背景 pass(FBO+shader)→ 第 2 趟画字形
+// (分两趟原因:主批 push 会因纹理切换提前 flush,字形先上屏会被全屏 quad 覆盖)
 ```
 
 ## 6. 对外扩展接口
@@ -335,7 +372,7 @@ DrawFrame(theme)
 
 ### 6.3 配置分层
 
-- **数据配置**(conf 文件,不编译):主题、字体、启动命令、快捷键映射。启动时读入,作为默认值。
+- **数据配置**(conf 文件,不编译):主题、字体、启动命令、快捷键映射、**背景 shader**(`resource/shader/background.frag`)。启动时读入,作为默认值。
 - **行为配置**(Odin 代码 / DLL,编译):自定义初始化流程、特殊布局逻辑。
 
 ## 7. 工程规则(编码规范)

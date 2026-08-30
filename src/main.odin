@@ -90,5 +90,8 @@ initWindows :: proc() -> bool {
 		return false
 	}
 	canvas.SetTheme(canvas.DRACULA_THEME)
+	render.SetBackgroundShaderEnabled(true)
+	render.ResetBackgroundShader()
+	render.SetVSync(true)
 	return true
 }
