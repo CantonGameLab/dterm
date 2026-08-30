@@ -134,11 +134,25 @@ ProcessKeys :: proc() {
 }
 
 // 每帧调用(main):消费 input 包鼠标状态。
-// 命中规则:鼠标点所在 leaf = 动作目标;应用鼠标模式(?1000/1002/1003)优先接管。
+// 命中规则:底部页签条优先(页操作,不落窗口树);否则鼠标点所在 leaf = 动作目标;
+// 应用鼠标模式(?1000/1002/1003)优先接管。
 ProcessMouse :: proc() {
 	m := &inp.Mouse
 	if !m.x_ok {
 		return
+	}
+	// 页签条命中(按下):切换页 / 新建页
+	if m.press != 0 {
+		if kind, index := TabBarHit(m.x, m.y); kind != .None {
+			switch kind {
+			case .Tab:
+				PageSwitch(PageByIndex(index + 1))
+			case .NewPage:
+				PageNew()
+			case .None:
+			}
+			return
+		}
 	}
 	node_h := nodeAtPoint(m.x, m.y)
 	if node_h.id == 0 {

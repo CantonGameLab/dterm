@@ -52,7 +52,9 @@ Window(leaf 节点)= 一个 App = 一个 ConPTY 子进程
 | `userapi.odin` | —(用户接口状态) | 用户接口函数族(id 省略 = 焦点)+ 默认启动配置(`default_cmd/font`)+ 绑定表管理(SetKeyBinding/ClearKeyBindings/UnsetKeyBinding/GetKeyBinding)+ 主题切换(SetTheme/ThemeGet)+ 叶子序 factor(SetSplitFactorLeaf) |
 | `parser.odin` | `ParsedCommand` | 指令字符串 → 用户函数(含 bind/unbind/bindings 键位配置命令;bind <mods+key> "<命令字符串>") |
 | `keybindings.odin` | `Binding`/`KeyMods` | 输入绑定:快捷键 = **数据化绑定表**(mods+key → 数据化命令),`InitDefaultKeyBindings` 经 userapi 填表(Alt+H/J/K/L 焦点 / Alt+Shift+L/J 分屏 / Ctrl+Shift+H/J/K/L 几何方向交换 / Ctrl+Shift+W 销毁 / **Shift+PageUp/Down 翻页** / F2 命令栏 / Ctrl+Shift+=/- 字号;增改走 SetKeyBinding);鼠标(滚轮/点击/SGR 编码) |
-| `theme.odin` | `Theme` | 主题数据(fg/bg/cursor + 16 ANSI + UI 色);颜色引用编码归属(DEFAULT_COLOR/colorRgb/colorIndex/ResolveColor/ansi256ToRgb 固定公式);SetTheme/ThemeGet |
+| `theme.odin` | `Theme` | 主题数据(fg/bg/cursor + 16 ANSI + UI 色:frame/focus_border/fps/**页签条 tab_\***);颜色引用编码归属(DEFAULT_COLOR/colorRgb/colorIndex/ResolveColor/ansi256ToRgb 固定公式);SetTheme/**GetTheme** |
+| `page.odin` | `Page` | 页数据:每页一棵窗口树(页持根句柄 + 页内焦点);页签几何/命中(PageTabRect/TabBarHit);PageCreate/New/Destroy/Switch/Next/Prev 生命周期 |
+| `ui.odin` | —(UI 定制状态) | UI 字体定制(页签/状态栏/FPS 共用):SetUIFont/GetUIFont/ResetUIFont;默认 consola 18 |
 
 ## 4. 程序状态(数据结构设计)
 
@@ -150,6 +152,36 @@ focused_iterm : i32        // -1 = 焦点在主应用;>=0 = iterms 下标
 - `Font`:faces / GSUB / 图集 / shape 缓存。
 - `Theme`:canvas 数据(唯一写者;见 4.0),渲染层每帧 `ThemeGet` 只读消费。
 
+### 4.6 页(Page,每页一棵窗口树)
+
+```odin
+// src/canvas/page.odin — 页数据(分页后根槽不再固定:根 = 普通 Alloc,页持有句柄)
+// 一棵树 = 一个标签页;树节点/console/font/window 表全局,页只是组织层
+// (根引用 + 页内焦点);句柄体系不变(id+世代),页切换无迁移。
+MAX_PAGE_SLOTS :: 16
+TAB_BAR_HEIGHT :: 28          // 底部页签条(状态栏雏形);树区高 = 物理高 - BAR
+
+Page :: struct {
+    title : [32]u8,           // 页标题(定长,默认 = 页序号)
+    title_len : u8,
+    tree_root : mem.Handle,   // 本页树根(页创建分配;根分裂时页字段跟随新父)
+    focused : mem.Handle,     // 页内焦点(每页记忆,切换即恢复)
+}
+pages : mem.GenArray(MAX_PAGE_SLOTS, Page)
+current_page : mem.Handle     // 当前页;0 = 无页(程序空态)
+```
+
+- **根语义变化**:`ROOT_WINDOW_TREE_NODE_ID=1 / AllocAt(1)` 废除;`WindowTreeRoot()` = 当前页根(页字段);`TreeNodeSplit` 根分支同步页根(根 id 迁移到新父);根壳常驻/吸收逻辑不变(用 parent_id==0 判根)
+- **页签几何/命中**:PageTabRect/NewTabRect(渲染与命中共用公式,标题宽经 UI 字体度量)、TabBarHit(点击页签切页 / "+" 建页);`ProcessMouse` 页签区优先于窗口树命中
+- **后台页休眠**:布局只算当前页;`WindowTreeSetRootSize` 更新所有页根几何 + 重排(尺寸变化),后台页布局延后到切回帧
+- **会话全量**:输出趟(updateConsoleOutput)与 PollSessions 不依赖页——后台页持续消费输出;会话结束判定**只信读线程 alive**(msys2 进程会脱离 Job,JobActiveProcesses 恒 0 不可靠)
+
+### 4.7 状态栏(页签条,一期)
+
+- 底部 28px 条:`[页签...][+] │ 状态区(预留)`;激活页签背景 = 主题 bg,与内容区**无缝延伸**(WT 式)
+- 主题字段:tab_bar_bg / tab_fg / tab_active_bg(= bg,默认延伸)/ tab_active_fg / tab_hover_bg
+- 一期交互:点击页签切页、点 + 建页、Ctrl+Tab/Ctrl+Shift+Tab 环绕切换;× 关闭右侧期
+
 ## 5. 接口分层:模块接口与用户接口
 
 **两类接口必须分开设计**——调用方掌握的上下文不同:
@@ -195,6 +227,10 @@ focused_iterm : i32        // -1 = 焦点在主应用;>=0 = iterms 下标
 | `unbind` | `<mods+key>` | 移除绑定(不存在 = 失败) |
 | `bindings` | - | 枚举全部绑定(输出格式可再 bind) |
 | `toggle-commandbar` / `togglebar` | - | 悬浮控制台开关(绑定动作的字符串形式) |
+| `page-new` | - | 新建页并切换(页根 + 根窗默认启动) |
+| `page` | `<n>` | 切换页(n = 页存活序,1-based,与页签次序一致) |
+| `page-next` / `page-prev` | - | 相邻页环绕 |
+| `page-close` | - | 关当前页(最后一页拒绝) |
 | `count` / `windows` | - | 查询窗口数量(经 UI 输出) |
 | `focus-get` / `getfocus` | - | 查询当前焦点窗口 id(经 UI 输出) |
 
@@ -251,8 +287,18 @@ count                  # 窗口数量
 | `FocusMove` | `(dir : FocusDirection, id = {}) -> bool` | 方向导航设焦点 |
 | `GetFocusWindow` | `() -> mem.Handle` | 查询焦点 |
 | `WindowCount` | `() -> int` | 查询窗口数 |
+| `PageCreate` | `() -> mem.Handle` | 建页(页槽 + 根空叶);不变为当前页 |
+| `PageNew` | `() -> mem.Handle` | 建页 + 根窗(默认启动配置)+ 切换(命令 page-new 的目标) |
+| `PageDestroy` | `(h) -> bool` | 关页(整树销毁:会话 → 窗口 → 节点);最后一页拒绝;当前页销毁 → 切相邻 |
+| `PageSwitch` | `(h) -> bool` | 切页(页内焦点即页字段,无同步) |
+| `PageNext` / `PagePrev` | `() -> bool` | 存活序环绕切换(单页 = 自己) |
+| `PageCount` / `PageCurrent` / `PageByIndex(n)` | `() -> (int / Handle)` | 查询(PageByIndex 1-based 存活序) |
+| `PageSetTitle` | `(h, s) -> bool` | 设置页标题(截断 31 字节) |
+| `SetUIFont` | `(path : string, size : f32) -> bool` | 设置 UI 字体(页签/状态栏/FPS 共用;失败保留旧) |
+| `GetUIFont` | `() -> mem.Handle` | 取 UI 字体(未设置惰性加载默认 consola 18) |
+| `ResetUIFont` | `()` | 回默认(consola 18) |
 | `SetTheme` | `(t : Theme)` | 切换主题:下一帧渲染全按新表解码(缓冲零重写) |
-| `ThemeGet` | `() -> Theme` | 查询当前主题(值语义) |
+| `GetTheme` | `() -> Theme` | 查询当前主题(值语义;原 ThemeGet 已统一改名) |
 | `InitDefaultKeyBindings` | `()` | 填充完整默认绑定表(经 SetKeyBinding;幂等 = 清空重建);main.initWindows 调用一次 |
 | `SetKeyBinding` | `(key : inp.Scancode, mods : KeyMods, cmd : ParsedCommand) -> bool` | 添加/覆盖一条绑定(同 key+mods 覆盖);表满(32)false |
 | `ClearKeyBindings` | `()` | 清空绑定表(重复初始化 = 清零重建,无状态判定) |
@@ -345,6 +391,7 @@ Init / Quit / GetWindowSize / GetWindow
 BeginFrame / EndFrame
 DrawRect / DrawRune / DrawGlyphById / DrawText / DrawRectBg
 DrawFrame()                                  // 无参:两趟遍历(背景趟 → 背景 pass → 字形趟)
+drawTabBar()                                 // 底部页签条(几何/命中在 canvas,渲染只读)
 // 背景可编程 shader(源码外置 resource/shader/:main.vert / main.frag / background.frag)
 InitBackgroundShader() -> bool               // 读 background.frag 编译(缺文件 = 背景 pass 不可用)
 SetBackgroundShader(src) -> bool             // 运行时替换(完整 GLSL;编译失败保留旧)

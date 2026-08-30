@@ -59,6 +59,11 @@ Theme :: struct {
 	frame : u32, // 分割条(原树节点 frame_color,主题化后节点回纯结构)
 	focus_border : u32, // 焦点窗口边框(kitty active_border 对应物)
 	fps_bg, fps_fg : u32, // 右上角 FPS tag
+	tab_bar_bg : u32, // 底部页签条背景(非激活区)
+	tab_fg : u32, // 非激活页签文字
+	tab_active_bg : u32, // 激活页签底(默认 = 主题 bg:WT 式"背景延伸进激活页签")
+	tab_active_fg : u32, // 激活页签文字(默认 = 主题 fg)
+	tab_hover_bg : u32, // 页签悬停底
 }
 
 // 默认主题(现行配色)
@@ -76,6 +81,11 @@ DEFAULT_THEME := Theme {
 	focus_border = 0x4FC3F7,
 	fps_bg = 0x101418,
 	fps_fg = 0x9FBFD8,
+	tab_bar_bg = 0x16161C,
+	tab_fg = 0x8A8F98,
+	tab_active_bg = 0x1E1E1E, // = bg(WT 式背景延伸)
+	tab_active_fg = 0xEAEAEA,
+	tab_hover_bg = 0x26262E,
 }
 
 current_theme : Theme = DEFAULT_THEME
@@ -96,6 +106,11 @@ DRACULA_THEME := Theme {
 	focus_border = 0xBD93F9,
 	fps_bg = 0x21222C,
 	fps_fg = 0x6272A4,
+	tab_bar_bg = 0x21222C,
+	tab_fg = 0x6272A4,
+	tab_active_bg = 0x282A36, // 激活页签 = 主题 bg(背景延伸)
+	tab_active_fg = 0xF8F8F2,
+	tab_hover_bg = 0x383A4E,
 }
 
 // 切换主题:下一帧渲染全部按新表解码(缓冲内容零重写)
@@ -103,6 +118,7 @@ SetTheme :: proc(t : Theme) {
 	current_theme = t
 }
 
-ThemeGet :: proc() -> Theme {
+// 查询当前主题(定制项统一命名:Set<域>/Get<域>)
+GetTheme :: proc() -> Theme {
 	return current_theme
 }

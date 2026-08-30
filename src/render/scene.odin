@@ -9,7 +9,7 @@ import s3 "vendor:sdl3"
 import "core:fmt"
 import "core:time"
 
-// 每帧绘制入口:只读遍历窗口树(主题经 cv.ThemeGet 只读消费)
+// 每帧绘制入口:只读遍历窗口树(主题经 cv.GetTheme 只读消费)
 // 两趟遍历:先背景(第 1 趟)→ 背景 pass(FBO+shader)→ 字形/前景(第 2 趟)。
 // 原因:主批 push 阶段会因纹理切换提前 flush,若字形先于背景 pass 上屏会被全屏
 // quad 覆盖;分开两趟保证"背景先定、字形后画"。
@@ -19,6 +19,7 @@ DrawFrame :: proc() {
 	drawWalk(cv.WindowTreeRoot(), false)
 	drawFocusBorder() // 焦点描边:画在所有内容与分割条之上
 	drawFps() // 右上角 FPS tag(观测数据,渲染层自身统计)
+	drawTabBar() // 底部页签条(状态栏雏形)
 	// 终端内容先上屏(flush 攒的 quad),否则 nano vulg 会画在终端之下
 	FlushBatch()
 	// UI 悬浮层(nanovg):在终端内容之上绘制控件
@@ -32,7 +33,6 @@ DrawFrame :: proc() {
 // ---------------------------------------------------------------------------
 // FPS tag(右上角):渲染层统计自身帧率,每 0.5s 刷新一次显示值
 // ---------------------------------------------------------------------------
-fps_font : mem.Handle // render.Init 加载;失败 = 不显示
 fps_start : time.Time
 fps_frames : int
 fps_value : f32
@@ -42,7 +42,8 @@ draw_shaped : [dynamic]u16
 draw_orig : [dynamic]u16
 
 drawFps :: proc() {
-	theme := cv.ThemeGet()
+	theme := cv.GetTheme()
+	uf := cv.GetUIFont() // UI 字体(定制项;页签/状态栏/FPS 共用)
 	fps_frames += 1
 	if fps_start == {} {
 		fps_start = time.now()
@@ -56,7 +57,7 @@ drawFps :: proc() {
 	if fps_value <= 0 {
 		return // 第一窗口期未满:不画
 	}
-	m := fnt.GetMetrics(fps_font)
+	m := fnt.GetMetrics(uf)
 	if m.cell_width <= 0 || m.cell_height <= 0 {
 		return
 	}
@@ -64,14 +65,59 @@ drawFps :: proc() {
 	w := f32(len(text)) * m.cell_width
 	x, y := screen_w - w - 12, f32(10)
 	DrawRect(x - 6, y - 2, w + 12, m.cell_height + 4, theme.fps_bg)
-	DrawText(fps_font, text, x, y + m.ascent, theme.fps_fg)
+	DrawText(uf, text, x, y + m.ascent, theme.fps_fg)
+}
+
+// ---------------------------------------------------------------------------
+// 底部页签条(状态栏雏形):条底 + 页签(激活 = 主题 bg,与内容区无缝延伸)+ "+"
+// 几何/命中在 canvas(PageTabRect/NewTabRect/TabBarHit),渲染只读绘制。
+// ---------------------------------------------------------------------------
+drawTabBar :: proc() {
+	theme := cv.GetTheme()
+	bar_y := screen_h - cv.TAB_BAR_HEIGHT
+	DrawRect(0, bar_y, screen_w, cv.TAB_BAR_HEIGHT, theme.tab_bar_bg)
+	uf := cv.GetUIFont()
+	m := fnt.GetMetrics(uf)
+	if m.cell_width <= 0 || m.cell_height <= 0 {
+		return
+	}
+	cur := cv.PageCurrent()
+	for i in 0 ..< cv.PageCount() {
+		page_h := cv.PageByIndex(i + 1)
+		if page_h.id == 0 {
+			break
+		}
+		rect, ok := cv.PageTabRect(i)
+		if !ok {
+			continue
+		}
+		active := page_h == cur
+		bg := theme.tab_bar_bg
+		fg := theme.tab_fg
+		if active {
+			bg = theme.tab_active_bg // = 主题 bg:WT 式背景延伸
+			fg = theme.tab_active_fg
+		}
+		DrawRect(rect.position_x, rect.position_y, rect.width, rect.height, bg)
+		t := cv.PageTitle(page_h)
+		tw := f32(len(t)) * m.cell_width
+		tx := rect.position_x + (rect.width - tw) * 0.5
+		ty := rect.position_y + m.ascent + (rect.height - m.cell_height) * 0.5
+		DrawText(uf, t, tx, ty, fg)
+	}
+	// "+" 新建按钮
+	nr := cv.NewTabRect()
+	DrawRect(nr.position_x, nr.position_y, nr.width, nr.height, theme.tab_hover_bg)
+	DrawText(uf, "+",
+		nr.position_x + (nr.width - m.cell_width) * 0.5,
+		nr.position_y + m.ascent + (nr.height - m.cell_height) * 0.5, theme.tab_fg)
 }
 
 // 焦点窗口边框高亮:焦点 leaf 矩形内侧描边(覆盖内容边缘,不动分割条)。
 FOCUS_BORDER_WIDTH :: f32(1.0)
 
 drawFocusBorder :: proc() {
-	theme := cv.ThemeGet()
+	theme := cv.GetTheme()
 	focus := cv.GetFocus()
 	if focus.id == 0 {
 		return
@@ -91,7 +137,7 @@ drawFocusBorder :: proc() {
 // 悬浮控制台:遍历焦点窗口的 iterm 工具层,取 .CommandBar 可见条目
 // 按 iterm 锚定几何绘制(nanovg 抗锯齿圆角长条)。
 drawCommandBar :: proc() {
-	theme := cv.ThemeGet()
+	theme := cv.GetTheme()
 	focus := cv.GetFocus()
 	if focus.id == 0 {
 		return
@@ -160,7 +206,7 @@ drawWalk :: proc(node_h : mem.Handle, bg : bool) {
 
 // 分割条:内部节点按 split_type 画一条 frame 宽度的色条(颜色读主题)
 drawFrame :: proc(node_h : mem.Handle) {
-	theme := cv.ThemeGet()
+	theme := cv.GetTheme()
 	node := cv.GetWindowTreeNode(node_h)
 	if node == nil {
 		return
@@ -184,7 +230,7 @@ drawFrame :: proc(node_h : mem.Handle) {
 }
 
 drawConsole :: proc(node_h : mem.Handle, bg : bool) {
-	theme := cv.ThemeGet()
+	theme := cv.GetTheme()
 	node := cv.GetWindowTreeNode(node_h)
 	if node == nil {
 		return

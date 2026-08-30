@@ -103,14 +103,17 @@ GetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> (Binding, bool) {
 // ---------------------------------------------------------------------------
 // 窗口树
 // ---------------------------------------------------------------------------
-// 从空窗口树初始化根节点 + 根窗口,返回根节点 handle;重复调用幂等。
-// 根窗也按默认启动配置应用(cmd 留空 = 仅建窗不启动)。
+// 当前页建根窗(页根已由 PageCreate 分配):挂新窗(幂等)+ 默认启动配置应用 + 设焦点。
 CreateWindowTreeRoot :: proc() -> mem.Handle {
-	InitWindowTree()
 	root := WindowTreeRoot()
-	win := CreateWindow()
-	if win.id != 0 {
-		TreeNodeSetWindow(root, win)
+	if root.id == 0 {
+		return {}
+	}
+	if NodeWindow(root) == nil {
+		win_h := CreateWindow()
+		if win_h.id != 0 {
+			TreeNodeSetWindow(root, win_h)
+		}
 	}
 	applyDefaultLaunch(root)
 	SetFocus(root)
@@ -167,6 +170,8 @@ DestroyWindow :: proc(id : mem.Handle = {}) -> bool {
 		brother = parent.left_son_id == node_h ? parent.right_son_id : parent.left_son_id
 	}
 	TreeNodeRemove(node_h)
+	// 所有页中指向该节点的焦点自愈(后台页切回时焦点不悬挂)
+	PageClearFocus(node_h)
 	// 焦点落在被删窗:摘树后定焦点。兄弟被释放/变内部 → 回落根(根壳常驻)
 	if GetFocus() == node_h {
 		b := GetWindowTreeNode(brother)
@@ -474,11 +479,7 @@ SetAutoClose :: proc(auto_close : bool, id : mem.Handle = {}) -> bool {
 // 遍历规范:一次遍历不改多种数据 —— 收集在遍历内,销毁/输出消费是显式处理段。
 // 返回 true = 仍有窗口(主循环继续);false = 所有窗口已关闭(程序可退出)。
 PollSessions :: proc() -> bool {
-	// 遍历:收集(读树/窗口/会话;不修改任何数据)
-	leaves : [MAX_TREE_NODE_SLOTS]mem.Handle
-	count := 0
-	collectLeaves(WindowTreeRoot(), &leaves, &count)
-
+	// 遍历(所有页,不只当前页):窗口在 = 程序继续;会话 ended 跨页收集
 	SessionEnded :: struct {
 		node_h : mem.Handle,
 		auto_close : bool,
@@ -486,22 +487,36 @@ PollSessions :: proc() -> bool {
 	ended : [MAX_TREE_NODE_SLOTS]SessionEnded
 	ended_count := 0
 	alive := false
-	for i in 0 ..< count {
-		node_h := leaves[i]
-		win := NodeWindow(node_h)
-		if win == nil {
-			continue // 无窗口
+
+	for pi in 1 ..< MAX_PAGE_SLOTS {
+		ph := mem.GetHandle(&pages, pi)
+		if ph.id == 0 {
+			continue
 		}
-		alive = true // 窗口还在 = 程序继续(会话可有可无)
-		console := GetConsole(win.console_id)
-		if console == nil {
-			continue // 空窗口/悬挂引用,无会话
+		root := PageTreeRoot(ph)
+		if root.id == 0 {
+			continue
 		}
-		// conpty 句柄无效(工具 console)时 JobActiveProcesses 返回 -1,视为无会话
-		jobs := ct.JobActiveProcesses(console.conpty_handle)
-		if jobs <= 0 || !ct.IsReadThreadAlive(console.conpty_handle) {
-			ended[ended_count] = SessionEnded { node_h = node_h, auto_close = win.auto_close }
-			ended_count += 1
+		leaves : [MAX_TREE_NODE_SLOTS]mem.Handle
+		count := 0
+		collectLeaves(root, &leaves, &count)
+		for i in 0 ..< count {
+			node_h := leaves[i]
+			win := NodeWindow(node_h)
+			if win == nil {
+				continue // 无窗口
+			}
+			alive = true // 任一页有窗口 = 程序继续(会话可有可无)
+			console := GetConsole(win.console_id)
+			if console == nil {
+				continue // 空窗口/悬挂引用,无会话
+			}
+			// 会话结束 = 读线程 dead(管道断开)。Job 活跃进程数不可靠:
+			// msys2 等进程会脱离我们创建的 Job(JobActiveProcesses 恒 0,会话仍活)。
+			if !ct.IsReadThreadAlive(console.conpty_handle) {
+				ended[ended_count] = SessionEnded { node_h = node_h, auto_close = win.auto_close }
+				ended_count += 1
+			}
 		}
 	}
 
@@ -512,7 +527,7 @@ PollSessions :: proc() -> bool {
 			DestroyWindow(ended[i].node_h)
 		}
 	}
-	return alive
+	return alive // 所有页都无窗口才退出
 }
 
 // 消费单个窗口 console 的剩余输出(会话结束前的最后内容)

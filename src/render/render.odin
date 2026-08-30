@@ -116,7 +116,6 @@ Init :: proc() -> bool {
 	initBatch()
 	initWhiteTexture()
 	UiInit() // UI 层(nanovg);失败则 UI 禁用,不影响主渲染
-	fps_font, _ = fnt.LoadFont("consola", 18) // FPS tag 字体;失败 = 不显示
 	InitBackgroundShader() // 读 resource/shader/background.frag(可先用 SetBackgroundShader 自愈)
 	return true
 }

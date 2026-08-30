@@ -18,7 +18,7 @@ index :: proc(n : int) -> u32 {
 }
 
 main :: proc() {
-	t := cv.ThemeGet()
+	t := cv.GetTheme()
 	fmt.println("== 解码(默认主题)==")
 	check("rgb passthrough", cv.ResolveColor(0x123456, 0), u32(0x123456))
 	check("default → theme.fg", cv.ResolveColor(0xFFFFFFFF, t.fg), t.fg)
@@ -34,7 +34,7 @@ main :: proc() {
 	t2.focus_border = 0x112233
 	cv.SetTheme(t2)
 	check("ansi override", cv.ResolveColor(index(1), 0), u32(0xABCDEF))
-	check("theme get", cv.ThemeGet().focus_border, u32(0x112233))
+	check("theme get", cv.GetTheme().focus_border, u32(0x112233))
 	cv.SetTheme(cv.DEFAULT_THEME)
 	check("restore", cv.ResolveColor(index(1), 0), t.ansi[1])
 

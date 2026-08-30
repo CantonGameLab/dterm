@@ -1,6 +1,7 @@
 // 窗口树数据:WindowTreeNode(节点)+ Transform(几何)+ SplitType/FocusDirection(方向枚举)。
 // 树结构操作(分裂/摘除/挂载/重算/焦点/命中)+ 每帧树遍历编排(ConsoleUpdateTree)。
 // 焦点是树状态;命中测试(nodeAtPoint)属树几何。
+// 分页:一棵树 = 一个页(树节点表全局,页只持根引用 + 页内焦点;根槽不再固定)。
 package canvas
 
 import ct "../conpty"
@@ -8,8 +9,6 @@ import fnt "../font"
 import mem "../memory"
 
 MAX_TREE_NODE_SLOTS :: 2000
-
-ROOT_WINDOW_TREE_NODE_ID :: 1 // 硬编码根节点:transform = 窗口分辨率,position = {0,0}
 
 // 绝对几何:像素坐标,由布局层按 split tree 递归算出
 Transform :: struct {
@@ -48,25 +47,14 @@ WindowTreeNode :: struct {
 
 window_tree_nodes : mem.GenArray(MAX_TREE_NODE_SLOTS, WindowTreeNode)
 
-// 窗口分辨率(root 的初始尺寸;resize 时更新)
+// 窗口区尺寸(内容高度 = 物理高 - 页签条;resize 时更新):
+//   Window_Width x Window_Height = 当前页 root 的几何根
 Window_Width : u32 = 1920
 
-Window_Height : u32 = 1080
+Window_Height : u32 = 1052 // = 1080 - TAB_BAR_HEIGHT
 
 // 分割条默认样式:1 像素宽(颜色读主题)
 DEFAULT_FRAME_WIDTH :: 1
-
-// 当前聚焦的 window(leaf);0 = 无。全局唯一。
-focused_node : mem.Handle
-
-InitWindowTree :: proc() {
-	mem.AllocAt(&window_tree_nodes, ROOT_WINDOW_TREE_NODE_ID, WindowTreeNode {
-		is_leaf = true,
-		frame_width = DEFAULT_FRAME_WIDTH,
-		width = f32(Window_Width),
-		height = f32(Window_Height),
-	})
-}
 
 CreateWindowTreeNode :: proc() -> (h : mem.Handle) {
 	return mem.Alloc(&window_tree_nodes, WindowTreeNode {
@@ -79,7 +67,7 @@ GetWindowTreeNode :: proc(h : mem.Handle) -> ^WindowTreeNode {
 	return mem.Get(&window_tree_nodes, h)
 }
 
-// 按 id 构造当前世代的有效句柄(指令字符串的 @id 用);槽不存在返回 0
+// 按 id 构造当前世代的有效句柄(指令字符串的 @id 用);槽不存在或**不在当前页树内**返回 0
 NodeHandleById :: proc(id : u32) -> mem.Handle {
 	if id == 0 || int(id) >= window_tree_nodes.next {
 		return {}
@@ -87,24 +75,57 @@ NodeHandleById :: proc(id : u32) -> mem.Handle {
 	if !mem.Alive(&window_tree_nodes, int(id)) {
 		return {}
 	}
-	return mem.Handle { id = id, generation = window_tree_nodes.generations[id] }
+	h := mem.Handle { id = id, generation = window_tree_nodes.generations[id] }
+	if !inCurrentPageTree(h) {
+		return {}
+	}
+	return h
 }
 
-// 树的根 = parent_id 为 0 的节点(分裂 root 后根迁移到新父)
-WindowTreeRoot :: proc() -> mem.Handle {
-	for i in 1 ..< MAX_TREE_NODE_SLOTS {
-		if node := mem.GetIndex(&window_tree_nodes, i); node != nil && node.parent_id.id == 0 {
-			return mem.Handle { id = u32(i), generation = window_tree_nodes.generations[i] }
+// 节点是否属于当前页树(沿 parent 上行至根 == 页根)
+inCurrentPageTree :: proc(h : mem.Handle) -> bool {
+	root := WindowTreeRoot()
+	if root.id == 0 {
+		return false
+	}
+	cur := h
+	for cur.id != 0 {
+		if cur == root {
+			return true
 		}
+		node := GetWindowTreeNode(cur)
+		if node == nil {
+			return false
+		}
+		cur = node.parent_id
+	}
+	return false
+}
+
+// 当前页树根(每页一棵树;根 = 页持有句柄,parent_id = 0)
+WindowTreeRoot :: proc() -> mem.Handle {
+	if p := mem.Get(&pages, current_page); p != nil {
+		return p.tree_root
 	}
 	return {}
 }
 
-// 清空整个窗口树(释放所有节点);之后可重新 CreateWindowTreeRoot
+// 清空当前页树(唯一剩余窗口关闭时):整树销毁,页根常驻(页仍可加窗/聚焦)。
+// 页根释放会让页句柄失效,故根不释放,只释放其后代并恢复空叶。
 ResetWindowTree :: proc() {
 	root := WindowTreeRoot()
-	if root.id != 0 {
-		TreeNodeRemoveAll(root)
+	if root.id == 0 {
+		return
+	}
+	if n := GetWindowTreeNode(root); n != nil && !n.is_leaf {
+		TreeNodeRemoveAll(n.left_son_id)
+		TreeNodeRemoveAll(n.right_son_id)
+		n.left_son_id = {}
+		n.right_son_id = {}
+		n.is_leaf = true
+	}
+	if n := GetWindowTreeNode(root); n != nil {
+		n.window_id = {}
 	}
 }
 
@@ -122,14 +143,19 @@ TreeNodeRemoveAll :: proc(h : mem.Handle) {
 }
 
 // ---------------------------------------------------------------------------
-// 焦点
+// 焦点(页内记忆:Set/Get 读写当前页字段,页切换即保留)
 // ---------------------------------------------------------------------------
 SetFocus :: proc(node_h : mem.Handle) {
-	focused_node = node_h
+	if p := mem.Get(&pages, current_page); p != nil {
+		p.focused = node_h
+	}
 }
 
 GetFocus :: proc() -> mem.Handle {
-	return focused_node
+	if p := mem.Get(&pages, current_page); p != nil {
+		return p.focused
+	}
+	return {}
 }
 
 FocusDirection :: enum u8 {
@@ -279,6 +305,12 @@ TreeNodeSplit :: proc(h : mem.Handle, split_type : SplitType, factor : f32) -> (
 	}
 	np := &window_tree_nodes.data[parent_h.id]
 	np.parent_id = node.parent_id // 接管 id 在父中的位置(根分裂则成为新根)
+	// 根分裂:新父成为页根,页字段跟随(根的 id 迁移,树根不再固定槽)
+	if node.parent_id.id == 0 {
+		if p := mem.Get(&pages, current_page); p != nil && p.tree_root == h {
+			p.tree_root = parent_h
+		}
+	}
 	np.is_leaf = false
 	np.split_type = split_type
 	np.split_factor = max(0.05, min(0.95, factor))
@@ -459,19 +491,24 @@ treeNodeSetSon :: proc(h, son_h : mem.Handle, is_left : bool) -> bool {
 // ---------------------------------------------------------------------------
 // 布局
 // ---------------------------------------------------------------------------
-// 窗口分辨率变化:更新 root 尺寸并整体重算
+// 窗口分辨率变化(物理尺寸):所有页 root 更新(内容高 = 物理高 - 页签条)并整体重算;
+// 后台页几何更新、布局延后(切回时帧内自动重算)
 WindowTreeSetRootSize :: proc(width, height : u32) {
-	root := GetWindowTreeNode(WindowTreeRoot())
-	if root == nil {
-		return
-	}
 	Window_Width = width
-	Window_Height = height
-	root.position_x = 0
-	root.position_y = 0
-	root.width = f32(width)
-	root.height = f32(height)
-	RecalculateTransforms(WindowTreeRoot())
+	Window_Height = height - u32(TAB_BAR_HEIGHT)
+	for i in 1 ..< MAX_PAGE_SLOTS {
+		if page := mem.GetIndex(&pages, i); page != nil {
+			root := GetWindowTreeNode(page.tree_root)
+			if root == nil {
+				continue
+			}
+			root.position_x = 0
+			root.position_y = 0
+			root.width = f32(Window_Width)
+			root.height = f32(Window_Height)
+			RecalculateTransforms(page.tree_root)
+		}
+	}
 }
 
 // 按 split_factor / split_type / frame_width 递归划分子节点几何

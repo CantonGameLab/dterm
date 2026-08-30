@@ -118,7 +118,7 @@ drawBackgroundPass :: proc(time_s : f32) {
 	// ① 背景批 → FBO(清 = 主题背景,与直接路径同底色)
 	gl.BindFramebuffer(gl.FRAMEBUFFER, bg_fbo)
 	gl.Viewport(0, 0, c.int(w), c.int(h))
-	theme := cv.ThemeGet()
+	theme := cv.GetTheme()
 	gl.ClearColor(
 		f32(theme.bg >> 16 & 0xFF) / 255,
 		f32(theme.bg >> 8 & 0xFF) / 255,

@@ -1,0 +1,348 @@
+// 页数据:每页一棵独立窗口树(页持有根句柄 + 页内焦点)。
+// 一棵树 = 一个"标签页":树节点表/console/font/window 均全局,页只是组织层
+// (根引用 + 焦点记忆);句柄体系不变(id+世代全局唯一,页切换无迁移)。
+// 根槽不再固定:根 = 普通 Alloc(parent_id = 0),页槽持有;根壳常驻/吸收逻辑不变。
+package canvas
+
+import mem "../memory"
+import fnt "../font"
+import "core:fmt"
+
+MAX_PAGE_SLOTS :: 16
+
+// 底部页签条(状态栏雏形)高度;树区高度 = 窗口物理高 - BAR
+TAB_BAR_HEIGHT :: f32(28)
+
+// 页签条内页签高度/内边距(渲染与命中共用)
+TAB_H :: f32(22)
+TAB_PAD_X :: f32(12)
+TAB_MIN_W :: f32(80)
+TAB_MAX_W :: f32(240)
+TAB_GAP :: f32(3)
+NEW_TAB_W :: f32(26) // "+" 新建按钮宽
+
+Page :: struct {
+	title : [32]u8, // 页标题(定长,截断;默认 = 页序号)
+	title_len : u8,
+	tree_root : mem.Handle, // 本页树根(空叶;页销毁时整树释放)
+	focused : mem.Handle, // 页内焦点(每页记忆,切换即复用,无同步)
+}
+
+pages : mem.GenArray(MAX_PAGE_SLOTS, Page)
+current_page : mem.Handle // 当前页;0 = 无页(程序空态)
+
+// ---------------------------------------------------------------------------
+// 生命周期
+// ---------------------------------------------------------------------------
+// 建页:分配页槽 + 根节点(空叶,几何 = 当前窗口区尺寸;无窗)
+PageCreate :: proc() -> mem.Handle {
+	root := CreateWindowTreeNode()
+	if root.id == 0 {
+		return {}
+	}
+	if n := GetWindowTreeNode(root); n != nil {
+		n.position_x = 0
+		n.position_y = 0
+		n.width = f32(Window_Width)
+		n.height = f32(Window_Height)
+	}
+	page_h := mem.Alloc(&pages, Page {
+		tree_root = root,
+	})
+	if page_h.id == 0 {
+		mem.Free(&window_tree_nodes, root)
+		return {}
+	}
+	pageSetTitleNum(page_h, page_h.id)
+	return page_h
+}
+
+// 新建页并切换:页 + 根窗(默认启动配置自动应用)+ 成为当前页
+PageNew :: proc() -> mem.Handle {
+	page_h := PageCreate()
+	if page_h.id == 0 {
+		return {}
+	}
+	PageSwitch(page_h)
+	if PageTreeRoot(page_h).id != 0 {
+		CreateWindowTreeRoot() // 当前页建根窗(applyDefaultLaunch)
+	}
+	return page_h
+}
+
+// 关页:先销毁整树(会话 → 窗口槽 → 节点),再释放页槽。
+// 最后一页拒绝(页空但存在;全部页无存活会话时主循环退出)。
+PageDestroy :: proc(page_h : mem.Handle) -> bool {
+	if mem.Get(&pages, page_h) == nil {
+		return false
+	}
+	if PageCount() <= 1 {
+		return false
+	}
+	destroyPageTree(PageTreeRoot(page_h))
+	mem.Free(&pages, page_h)
+	if current_page == page_h {
+		current_page = {}            // 临时空;切到相邻页(存活序环绕)
+		if !PageNext() {
+			PagePrev()
+		}
+	}
+	return true
+}
+
+// 整树销毁:leaf 窗口(会话 → 槽)先清,再递归释放节点(含根)
+destroyPageTree :: proc(root : mem.Handle) {
+	if root.id == 0 {
+		return
+	}
+	leaves : [MAX_TREE_NODE_SLOTS]mem.Handle
+	count := 0
+	collectLeaves(root, &leaves, &count)
+	for i in 0 ..< count {
+		if win := NodeWindow(leaves[i]); win != nil {
+			clearConsoleRefs(win.console_id)
+			DestroyConsole(win.console_id)
+			DestroyWindowSlot(GetWindowTreeNode(leaves[i]).window_id)
+		}
+	}
+	TreeNodeRemoveAll(root)
+}
+
+// ---------------------------------------------------------------------------
+// 切换
+// ---------------------------------------------------------------------------
+// 切页:页焦点即页字段,无需同步;当前页帧内自动布局(几何已按最新尺寸)
+PageSwitch :: proc(page_h : mem.Handle) -> bool {
+	if mem.Get(&pages, page_h) == nil {
+		return false
+	}
+	current_page = page_h
+	return true
+}
+
+PageNext :: proc() -> bool {
+	return pageShift(1)
+}
+
+PagePrev :: proc() -> bool {
+	return pageShift(-1)
+}
+
+pageShift :: proc(d : int) -> bool {
+	if PageCount() < 1 {
+		return false
+	}
+	cur := pageIndexInAlive(current_page)
+	if cur < 0 {
+		// 空位兜底(如刚销毁当前页):直接取第一存活页
+		h := PageByIndex(1)
+		if h.id == 0 {
+			return false
+		}
+		return PageSwitch(h)
+	}
+	n := (cur + d + PageCount()) % PageCount()
+	h := PageByIndex(n + 1) // 1-based
+	if h.id == 0 {
+		return false
+	}
+	return PageSwitch(h)
+}
+
+// 当前页在存活序中的位置(0-based);-1 = 无
+pageIndexInAlive :: proc(page_h : mem.Handle) -> int {
+	idx := 0
+	for i in 1 ..< MAX_PAGE_SLOTS {
+		if mem.GetIndex(&pages, i) != nil {
+			if mem.GetHandle(&pages, i) == page_h {
+				return idx
+			}
+			idx += 1
+		}
+	}
+	return -1
+}
+
+// ---------------------------------------------------------------------------
+// 查询
+// ---------------------------------------------------------------------------
+PageCount :: proc() -> int {
+	count := 0
+	for i in 1 ..< MAX_PAGE_SLOTS {
+		if mem.GetIndex(&pages, i) != nil {
+			count += 1
+		}
+	}
+	return count
+}
+
+PageCurrent :: proc() -> mem.Handle {
+	return current_page
+}
+
+// 存活序第 n 个页(1-based)
+PageByIndex :: proc(n : int) -> mem.Handle {
+	idx := 0
+	for i in 1 ..< MAX_PAGE_SLOTS {
+		if mem.GetIndex(&pages, i) != nil {
+			idx += 1
+			if idx == n {
+				return mem.GetHandle(&pages, i)
+			}
+		}
+	}
+	return {}
+}
+
+// 页树根(页不存在 = 0)
+PageTreeRoot :: proc(page_h : mem.Handle) -> mem.Handle {
+	if p := mem.Get(&pages, page_h); p != nil {
+		return p.tree_root
+	}
+	return {}
+}
+
+// 页标题(渲染/页签借用,只读;截断 31 字节)
+PageTitle :: proc(page_h : mem.Handle) -> string {
+	if p := mem.Get(&pages, page_h); p != nil {
+		return string(p.title[:p.title_len])
+	}
+	return ""
+}
+
+PageSetTitle :: proc(page_h : mem.Handle, s : string) -> bool {
+	p := mem.Get(&pages, page_h)
+	if p == nil {
+		return false
+	}
+	n := min(len(s), 31)
+	copy(p.title[:n], s)
+	p.title_len = u8(n)
+	return true
+}
+
+pageSetTitleNum :: proc(page_h : mem.Handle, n : u32) {
+	p := mem.Get(&pages, page_h)
+	if p == nil {
+		return
+	}
+	s := fmt.tprintf("%d", n)
+	nn := min(len(s), 31)
+	copy(p.title[:nn], s)
+	p.title_len = u8(nn)
+}
+
+// ---------------------------------------------------------------------------
+// 页签几何(渲染与命中共用同一公式;按存活序从左到右)
+// ---------------------------------------------------------------------------
+// 页签 index(0-based 存活序)矩形(绝对屏幕坐标,含条内定位)
+PageTabRect :: proc(index : int) -> (rect : Transform, ok : bool) {
+	page_h := PageByIndex(index + 1)
+	if page_h.id == 0 {
+		return {}, false
+	}
+	w := tabWidth(page_h)
+	x := tabAreaX(index)
+	bar_top := f32(Window_Height) // 内容区底 = 条顶
+	return Transform {
+		position_x = x,
+		position_y = bar_top + (TAB_BAR_HEIGHT - TAB_H) * 0.5,
+		width = w,
+		height = TAB_H,
+	}, true
+}
+
+// "+" 新建按钮矩形
+NewTabRect :: proc() -> Transform {
+	bar_top := f32(Window_Height)
+	return Transform {
+		position_x = tabAreaX(pageCountAlive()) + TAB_GAP,
+		position_y = bar_top + (TAB_BAR_HEIGHT - TAB_H) * 0.5,
+		width = NEW_TAB_W,
+		height = TAB_H,
+	}
+}
+
+// 页签序 x 起点(左侧留 6px 边)
+tabAreaX :: proc(index : int) -> f32 {
+	x := f32(6) + NEW_TAB_W + TAB_GAP * 2
+	for i in 0 ..< index {
+		page_h := PageByIndex(i + 1)
+		if page_h.id == 0 {
+			break
+		}
+		x += tabWidth(page_h) + TAB_GAP
+	}
+	return x
+}
+
+// 页签宽(标题度量 + padding,clamp 最小/最大)
+tabWidth :: proc(page_h : mem.Handle) -> f32 {
+	m := fnt.GetMetrics(GetUIFont())
+	text_w := f32(len(PageTitle(page_h))) * m.cell_width
+	w := text_w + TAB_PAD_X * 2
+	if w < TAB_MIN_W {
+		w = TAB_MIN_W
+	}
+	if w > TAB_MAX_W {
+		w = TAB_MAX_W
+	}
+	return w
+}
+
+pageCountAlive :: proc() -> int {
+	return PageCount()
+}
+
+// 页签条命中:返回命中元素(index 0-based 页签 / -1 = "+" 按钮)
+TabBarHit :: proc(x, y : f32) -> (kind : TabHitKind, index : int) {
+	if y < f32(Window_Height) {
+		return .None, -1
+	}
+	n := pageCountAlive()
+	for i in 0 ..< n {
+		rect, ok := PageTabRect(i)
+		if ok && x >= rect.position_x && x < rect.position_x + rect.width &&
+			y >= rect.position_y && y < rect.position_y + rect.height {
+			return .Tab, i
+		}
+	}
+	nr := NewTabRect()
+	if x >= nr.position_x && x < nr.position_x + nr.width &&
+		y >= nr.position_y && y < nr.position_y + nr.height {
+		return .NewPage, -1
+	}
+	return .None, -1
+}
+
+TabHitKind :: enum u8 {
+	None,
+	Tab,
+	NewPage,
+}
+
+// ---------------------------------------------------------------------------
+// 焦点自愈
+// ---------------------------------------------------------------------------
+// 节点被销毁时清理所有页中指向它的焦点(后台页切回时焦点不悬挂)
+PageClearFocus :: proc(node_h : mem.Handle) {
+	for pi in 1 ..< MAX_PAGE_SLOTS {
+		p := mem.GetIndex(&pages, pi)
+		if p != nil && p.focused == node_h {
+			p.focused = firstLeafWithWindow(p.tree_root) // 0 = 无窗
+		}
+	}
+}
+
+// 子树中最左的有窗口 leaf;无 = 0
+firstLeafWithWindow :: proc(root : mem.Handle) -> mem.Handle {
+	leaves : [MAX_TREE_NODE_SLOTS]mem.Handle
+	count := 0
+	collectLeaves(root, &leaves, &count)
+	for i in 0 ..< count {
+		if NodeWindow(leaves[i]) != nil {
+			return leaves[i]
+		}
+	}
+	return {}
+}

@@ -77,16 +77,22 @@ initWindows :: proc() -> bool {
 	canvas.SetKeyBinding(.EQUALS, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .FontSizeUp })
 	canvas.SetKeyBinding(.MINUS, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .FontSizeDown })
 
+	// 页签切换
+	canvas.SetKeyBinding(.TAB, {.Ctrl}, canvas.ParsedCommand { kind = .PageNext })
+	canvas.SetKeyBinding(.TAB, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .PagePrev })
 
-	// 默认启动:新建窗口自动 设 FiraCode 26 → 启动 cmd;
-	// 默认配置须在 CreateWindowTreeRoot 之前设置(只对之后创建的窗口生效)
+
+	// 默认启动:新建窗口自动 设 FiraCode 26 → 启动 bash;
+	// 默认配置须在 PageNew 之前设置(只对之后创建的窗口生效)
 	
+	// 调试会话:cmd.exe(msys2 bash 在受限宿主下 CreateFileMapping 失败;
+	// 在你自己的终端会话里按环境换回 msys2_shell.cmd)
 	canvas.SetDefaultLaunch(
 		"cmd.exe",
 		"FiraCode Nerd Font Mono", 26)
-	// 根窗 0(自动启动默认)
-	root := canvas.CreateWindowTreeRoot()
-	if root.id == 0 {
+	// 第一页:页根 + 根窗(自动启动默认),成为当前页
+	page := canvas.PageNew()
+	if page.id == 0 {
 		return false
 	}
 	canvas.SetTheme(canvas.DRACULA_THEME)

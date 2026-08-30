@@ -14,7 +14,7 @@ import cv "../../src/canvas"
 import "core:fmt"
 
 main :: proc() {
-	cv.CreateWindowTreeRoot()
+	cv.PageNew()
 	cv.SplitNewWindow(.LeftRight) // R;焦点 = 右叶(L4)
 	cv.FocusMove(.Left) // → L1
 	cv.SplitNewWindow(.UpDown) // A;焦点 = L2

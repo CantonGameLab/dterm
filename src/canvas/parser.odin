@@ -94,6 +94,21 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 			}
 		}
 		return true
+	case .PageNew:
+		return PageNew().id != 0
+	case .PageSwitch:
+		// :page <n> — n = 页存活序(1-based)
+		h := PageByIndex(cmd.ival)
+		if h.id == 0 {
+			return false
+		}
+		return PageSwitch(h)
+	case .PageNext:
+		return PageNext()
+	case .PagePrev:
+		return PagePrev()
+	case .PageClose:
+		return PageDestroy(PageCurrent())
 	case .Count:
 		if out != nil {
 			out(fmt.tprintf("windows: %d", WindowCount()))
@@ -148,9 +163,14 @@ CommandStringKind :: enum u8 {
 	Count,
 	FocusGet,
 	FactorLeaf,   // ival:叶子序号(1-based)认领的 split;fval:新 factor
-	SetBinding,   // sc+mods:键组合;sval:目标命令字符串(执行时再解析)
+	SetBinding,   // sc+mods:键组合;sub:子命令句柄(解析层分配,消费后释放)
 	UnsetBinding, // sc+mods:移除该绑定
 	BindingsGet,  // 枚举输出全部绑定
+	PageNew,      // 新建页并切换
+	PageSwitch,   // ival:页存活序(1-based,与页签次序一致)
+	PageNext,     // 相邻页
+	PagePrev,
+	PageClose,    // 关当前页
 }
 
 ParsedCommand :: struct {
@@ -363,6 +383,24 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 		pc.kind = .ReviewDown
 	case "toggle-commandbar", "togglebar":
 		pc.kind = .ToggleCommandBar
+	case "page-new":
+		pc.kind = .PageNew
+	case "page":
+		if argn < 1 {
+			return {}, false
+		}
+		n, ok := parseU32(args[0])
+		if !ok {
+			return {}, false
+		}
+		pc.kind = .PageSwitch
+		pc.ival = int(n)
+	case "page-next":
+		pc.kind = .PageNext
+	case "page-prev":
+		pc.kind = .PagePrev
+	case "page-close":
+		pc.kind = .PageClose
 	case:
 		return {}, false
 	}

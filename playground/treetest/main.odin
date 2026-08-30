@@ -13,7 +13,7 @@ dump :: proc(tag : string) {
 }
 
 main :: proc() {
-	cv.CreateWindowTreeRoot()
+	cv.PageNew() // 分页:第一页(页根 + 根窗)
 	cv.SplitNewWindow(.LeftRight)
 	win2 := cv.GetFocusWindow()
 	cv.FocusMove(.Left)
