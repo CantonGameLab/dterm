@@ -15,9 +15,13 @@ import "core:fmt"
 //            第 r 行第 c 列格子左上角像素 = (origin_x + c*cell_w, origin_y + r*cell_h);cell 来自 font 度量
 // 颜色编码(DEFAULT_COLOR/colorRgb/colorIndex)见 theme.odin
 
+// 装饰样式语义位(渲染层才做字体变体/合成/画线;下划线样式:0 无 1 单 2 双)
 CellStyle :: struct {
 	fg, bg : u32,
-	bold, italic, underline, reverse : bool,
+	bold, italic, reverse : bool,
+	underline : u8, // 0 无 / 1 单(SGR 4)/ 2 双(SGR 21)
+	crossed : bool, // SGR 9
+	overline : bool, // SGR 53
 }
 
 Cell :: struct {
@@ -85,14 +89,6 @@ CreateTermBuffer :: proc() -> (h : mem.Handle, ok : bool) {
 
 GetTermBuffer :: proc(h : mem.Handle) -> ^TermBuffer {
 	return mem.Get(&term_buffers, h)
-}
-
-TermBufferLineCount :: proc(h : mem.Handle) -> int {
-	tb := GetTermBuffer(h)
-	if tb == nil {
-		return 0
-	}
-	return len(tb.lines)
 }
 
 DestroyTermBuffer :: proc(h : mem.Handle) {

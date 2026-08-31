@@ -9,8 +9,8 @@
 //   - @id 放末尾指定目标节点(缺省 = 当前焦点)
 //   - bind/unbind 的键组合 = mods+key:alt/ctrl/shift/win 前缀以 '+' 连向键名
 //     (大小写不敏感,如 f2/alt+shift+l/ctrl+shift+=);目标命令 = 带引号命令字符串
-// 例:split right 0.5 / focus left / font "a.ttf" 40 / launch "cmd.exe" @3 /
-//    bind alt+shift+l "split right" / unbind f2 / bindings
+// 例:split right 0.5 / split left / split up / focus left / font "a.ttf" 40 /
+//    launch "cmd.exe" @3 / bind alt+shift+l "split right" / unbind f2 / bindings
 package canvas
 
 import "core:fmt"
@@ -36,8 +36,8 @@ ExecuteCommandString :: proc(s : string, out : proc(msg : string) = nil) -> bool
 ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> bool {
 	switch cmd.kind {
 	case .Split:
-		// :split <right|down> [factor] [@id]
-		return SplitNewWindow(cmd.dir, cmd.target) != mem.Handle {}
+		// :split <left|right|up|down> [factor] [@id];left/up = 新窗在首侧
+		return SplitNewWindow(cmd.dir, cmd.target, cmd.split_first) != mem.Handle {}
 	case .FocusId:
 		return SetFocusWindow(cmd.target)
 	case .FocusDir:
@@ -51,6 +51,10 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 	case .Exchange:
 		return ExchangeWindow(cmd.fdir, cmd.target)
 	case .Font:
+		if cmd.sval == "" {
+			// "font 44" / 空名称 = 只改当前字体大小(名称缺省用当前字体)
+			return SetWindowFontSize(cmd.fval, cmd.target)
+		}
 		return SetWindowFont(cmd.sval, cmd.fval, cmd.target)
 	case .FontSize:
 		return SetWindowFontSize(cmd.fval, cmd.target)
@@ -71,7 +75,7 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 	case .ReviewDown:
 		return ConsoleScroll(focusRows(cmd.target), cmd.target)
 	case .ToggleCommandBar:
-		ToggleCommandBar(cmd.target)
+		ToggleCommandBar()
 		return true
 	case .SetBinding:
 		// :bind <mods+key> "<命令字符串>" — 子命令已由解析层解析入表(sub 句柄),执行只读
@@ -84,11 +88,12 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 		return UnsetKeyBinding(inp.Scancode(cmd.sc), cmd.mods)
 	case .BindingsGet:
 		if out != nil {
-			if keybinding_count == 0 {
+			kb := GetKeyBindings()
+			if kb.count == 0 {
 				out("(no bindings)")
 			}
-			for i in 0 ..< keybinding_count {
-				b := &default_bindings[i]
+			for i in 0 ..< kb.count {
+				b := &kb.bindings[i]
 				combo : [64]u8
 				out(fmt.tprintf("bind %s \"%v\"", comboName(b.mods, b.key, &combo), b.cmd.kind))
 			}
@@ -176,7 +181,8 @@ CommandStringKind :: enum u8 {
 ParsedCommand :: struct {
 	kind : CommandStringKind,
 	target : mem.Handle, // @id 解析出的节点(带世代);0 = 焦点
-	dir : SplitType, // Split 用
+	dir : SplitType, // Split 用(轴)
+	split_first : bool, // Split:新窗在首侧(左/上);false = 右/下
 	fdir : FocusDirection, // Focus 用;Exchange 仅 Left/Right(叶子序)
 	fval : f32, // Factor/Font
 	ival : int, // FactorLeaf:叶子序号(1-based)
@@ -223,12 +229,13 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 		if argn < 1 {
 			return {}, false
 		}
-		dir, ok := parseSplitDir(args[0])
+		dir, first, ok := parseSplitDir(args[0])
 		if !ok {
 			return {}, false
 		}
 		pc.kind = .Split
 		pc.dir = dir
+		pc.split_first = first
 		if argn >= 2 {
 			f, ok := parseF32(args[1])
 			if !ok {
@@ -574,14 +581,19 @@ parseF32 :: proc(s : string) -> (f32, bool) {
 	return v, true
 }
 
-parseSplitDir :: proc(s : string) -> (SplitType, bool) {
+// split 方向词 → (轴, 新窗在首侧(左/上), ok)。left/up = 新窗在首侧。
+parseSplitDir :: proc(s : string) -> (SplitType, bool, bool) {
 	switch s {
 	case "right", "leftright", "h":
-		return .LeftRight, true
+		return .LeftRight, false, true
+	case "left":
+		return .LeftRight, true, true
 	case "down", "updown", "v":
-		return .UpDown, true
+		return .UpDown, false, true
+	case "up":
+		return .UpDown, true, true
 	}
-	return {}, false
+	return {}, false, false
 }
 
 parseFocusDir :: proc(s : string) -> (FocusDirection, bool) {

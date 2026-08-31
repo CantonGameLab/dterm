@@ -232,28 +232,14 @@ jobAssign :: proc(job, process : win.HANDLE) {
 	AssignProcessToJobObject(job, process)
 }
 
-// Job 内活动进程数;0 = 会话结束(整个进程树退出)
-JobActiveProcesses :: proc(h : mem.Handle) -> int {
-	ctx := GetConptyContext(h)
-	if ctx == nil || ctx.job == nil {
-		return -1 // 无 Job(创建失败等):交给读线程断开检测兜底
-	}
-	info : JobObjectBasicAccountingInfo
-	ret : u32
-	if QueryInformationJobObject(ctx.job, JOBOBJECTINFOCLASS_BASIC_ACCOUNTING, &info, size_of(JobObjectBasicAccountingInfo), &ret) == 0 {
-		return -1
-	}
-	return int(info.active_processes)
-}
-
-// 子进程是否还活着(整个 Job 树内);false = 会话结束
+// 子进程(主进程)是否还活着;false = 会话结束。
+// 判定 = GetExitCodeProcess(最终信号)。Job 只用于 KILL_ON_CLOSE 兜底,
+// 不参与存活判定:msys2 等进程会脱离我们创建的 Job(JobActiveProcesses 恒 0,
+// 用它判定会误杀活会话)。
 IsChildAlive :: proc(h : mem.Handle) -> bool {
 	ctx := GetConptyContext(h)
 	if ctx == nil {
 		return false
-	}
-	if ctx.job != nil {
-		return JobActiveProcesses(h) > 0
 	}
 	if ctx.proc_info.hProcess == win.INVALID_HANDLE_VALUE {
 		return false

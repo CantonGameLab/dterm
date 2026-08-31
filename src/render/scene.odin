@@ -15,23 +15,21 @@ import "core:time"
 // quad 覆盖;分开两趟保证"背景先定、字形后画"。
 DrawFrame :: proc() {
 	drawWalk(cv.WindowTreeRoot(), true)
+	// 背景延伸成员(均在背景 pass 前进背景批 → 与内容区同一 shader):
+	//   焦点描边 + 激活页签底(输入色 = theme.bg → shader 后同值,无缝融合)
+	drawFocusBorder()
+	drawTabBarActiveBg()
 	drawBackgroundPass(f32(s3.GetTicks()) / 1000.0) // 背景批 → FBO → shader(开关 on)
 	drawWalk(cv.WindowTreeRoot(), false)
-	drawFocusBorder() // 焦点描边:画在所有内容与分割条之上
-	drawFps() // 右上角 FPS tag(观测数据,渲染层自身统计)
-	drawTabBar() // 底部页签条(状态栏雏形)
-	// 终端内容先上屏(flush 攒的 quad),否则 nano vulg 会画在终端之下
+	// 底部页签条(状态栏雏形):条底 + 页签 + 右侧工具区(命令栏输入框、FPS)
+	drawTabBar()
+	drawCommandBar()
+	drawFps()
 	FlushBatch()
-	// UI 悬浮层(nanovg):在终端内容之上绘制控件
-	if cv.CommandBarVisible() {
-		UiBegin(screen_w, screen_h) // 需要物理像素尺寸
-		drawCommandBar()
-		UiEnd()
-	}
 }
 
 // ---------------------------------------------------------------------------
-// FPS tag(右上角):渲染层统计自身帧率,每 0.5s 刷新一次显示值
+// FPS tag(条内最右角):渲染层统计自身帧率,每 0.5s 刷新一次显示值
 // ---------------------------------------------------------------------------
 fps_start : time.Time
 fps_frames : int
@@ -62,24 +60,73 @@ drawFps :: proc() {
 		return
 	}
 	text := fmt.tprintf("%.0f fps", fps_value)
-	w := f32(len(text)) * m.cell_width
-	x, y := screen_w - w - 12, f32(10)
-	DrawRect(x - 6, y - 2, w + 12, m.cell_height + 4, theme.fps_bg)
-	DrawText(uf, text, x, y + m.ascent, theme.fps_fg)
+	text_w := f32(len(text)) * m.cell_width
+	r := cv.FpsTagRect()
+	DrawRect(r.position_x, r.position_y, r.width, r.height, theme.fps_bg)
+	DrawText(uf, text,
+		r.position_x + (r.width - text_w) * 0.5,
+		r.position_y + m.ascent + (r.height - m.cell_height) * 0.5, theme.fps_fg)
 }
 
 // ---------------------------------------------------------------------------
-// 底部页签条(状态栏雏形):条底 + 页签(激活 = 主题 bg,与内容区无缝延伸)+ "+"
-// 几何/命中在 canvas(PageTabRect/NewTabRect/TabBarHit),渲染只读绘制。
+// 底部页签条(状态栏雏形):条底 + 页签(激活 = 主题 bg,经背景管线与内容区
+// 同一 shader,无缝融合)+ "+"。几何/命中在 canvas(PageTabRect/NewTabRect/
+// TabBarHit),渲染只读绘制。
 // ---------------------------------------------------------------------------
+
+// 背景趟(pass 前):激活页签底进背景批次 → FBO → 与内容区同一 shader。
+// 输入色 = theme.bg(内容区打底色),变换同源 → shader 后同值,分界线消失。
+drawTabBarActiveBg :: proc() {
+	theme := cv.GetTheme()
+	cur := cv.PageCurrent()
+	for i in 0 ..< cv.PageCount() {
+		page_h := cv.PageByIndex(i + 1)
+		if page_h.id == 0 {
+			break
+		}
+		if page_h != cur {
+			continue
+		}
+		rect, ok := cv.PageTabRect(i)
+		if !ok {
+			return
+		}
+		DrawRectBg(rect.position_x, rect.position_y, rect.width, rect.height, theme.tab_active_bg)
+		return // 激活页签唯一
+	}
+}
+
+// 激活页签矩形(主批条底分段避让用);无 = 全宽条底
+activeTabRect :: proc() -> (cv.Transform, bool) {
+	cur := cv.PageCurrent()
+	for i in 0 ..< cv.PageCount() {
+		page_h := cv.PageByIndex(i + 1)
+		if page_h.id == 0 {
+			break
+		}
+		if page_h == cur {
+			return cv.PageTabRect(i)
+		}
+	}
+	return cv.Transform {}, false
+}
+
 drawTabBar :: proc() {
 	theme := cv.GetTheme()
 	bar_y := screen_h - cv.TAB_BAR_HEIGHT
-	DrawRect(0, bar_y, screen_w, cv.TAB_BAR_HEIGHT, theme.tab_bar_bg)
 	uf := cv.GetUIFont()
 	m := fnt.GetMetrics(uf)
 	if m.cell_width <= 0 || m.cell_height <= 0 {
 		return
+	}
+	// 条底分段:激活页签区域留给背景趟(已经 shader 融合),不覆盖
+	ar, has_active := activeTabRect()
+	if has_active {
+		DrawRect(0, bar_y, ar.position_x, cv.TAB_BAR_HEIGHT, theme.tab_bar_bg)
+		right_x := ar.position_x + ar.width
+		DrawRect(right_x, bar_y, screen_w - right_x, cv.TAB_BAR_HEIGHT, theme.tab_bar_bg)
+	} else {
+		DrawRect(0, bar_y, screen_w, cv.TAB_BAR_HEIGHT, theme.tab_bar_bg)
 	}
 	cur := cv.PageCurrent()
 	for i in 0 ..< cv.PageCount() {
@@ -92,13 +139,13 @@ drawTabBar :: proc() {
 			continue
 		}
 		active := page_h == cur
-		bg := theme.tab_bar_bg
 		fg := theme.tab_fg
 		if active {
-			bg = theme.tab_active_bg // = 主题 bg:WT 式背景延伸
 			fg = theme.tab_active_fg
+			// 激活页签底 = 背景趟产物,此处只画文本
+		} else {
+			DrawRect(rect.position_x, rect.position_y, rect.width, rect.height, theme.tab_bar_bg)
 		}
-		DrawRect(rect.position_x, rect.position_y, rect.width, rect.height, bg)
 		t := cv.PageTitle(page_h)
 		tw := f32(len(t)) * m.cell_width
 		tx := rect.position_x + (rect.width - tw) * 0.5
@@ -114,60 +161,69 @@ drawTabBar :: proc() {
 }
 
 // 焦点窗口边框高亮:焦点 leaf 矩形内侧描边(覆盖内容边缘,不动分割条)。
+// 经 DrawRectBg 进背景管线:与背景共用同一 shader(纯色背景 = 纯色边框;
+// shader 背景 = 边框同变换,自然延伸)。
 FOCUS_BORDER_WIDTH :: f32(1.0)
 
 drawFocusBorder :: proc() {
 	theme := cv.GetTheme()
-	focus := cv.GetFocus()
+	focus := cv.CurrentPage().focused
 	if focus.id == 0 {
 		return
 	}
-	t := cv.NodeContentTransform(focus)
+	node := cv.GetWindowTreeNode(focus)
+	if node == nil {
+		return
+	}
+	t := node.transform
 	if t.width <= 0 || t.height <= 0 {
 		return
 	}
 	d := FOCUS_BORDER_WIDTH
 	c := theme.focus_border
-	DrawRect(t.position_x, t.position_y, t.width, d, c) // 上
-	DrawRect(t.position_x, t.position_y + t.height - d, t.width, d, c) // 下
-	DrawRect(t.position_x, t.position_y, d, t.height, c) // 左
-	DrawRect(t.position_x + t.width - d, t.position_y, d, t.height, c) // 右
+	// DrawRectBg = 背景批(开关 on → FBO/背景 shader;off → 直接屏幕)。
+	// 与背景共用 shader:纯色背景 = 纯色边框;shader 背景 = 边框同变换延伸。
+	DrawRectBg(t.position_x, t.position_y, t.width, d, c) // 上
+	DrawRectBg(t.position_x, t.position_y + t.height - d, t.width, d, c) // 下
+	DrawRectBg(t.position_x, t.position_y, d, t.height, c) // 左
+	DrawRectBg(t.position_x + t.width - d, t.position_y, d, t.height, c) // 右
 }
 
-// 悬浮控制台:遍历焦点窗口的 iterm 工具层,取 .CommandBar 可见条目
-// 按 iterm 锚定几何绘制(nanovg 抗锯齿圆角长条)。
+// 命令栏(集成在页签条右侧):输入框 + ':' 前缀 + 输入文本 + 光标(500ms 闪烁)。
+// 文本显示窗口按光标动态滑动(本地计算,不落存储);几何 = canvas.CommandBarRect。
 drawCommandBar :: proc() {
+	if !cv.CommandBarVisible() {
+		return
+	}
 	theme := cv.GetTheme()
-	focus := cv.GetFocus()
-	if focus.id == 0 {
+	uf := cv.GetUIFont()
+	m := fnt.GetMetrics(uf)
+	if m.cell_width <= 0 || m.cell_height <= 0 {
 		return
 	}
-	win := cv.NodeWindow(focus)
-	if win == nil {
-		return
-	}
-	index := -1
-	for i in 0 ..< len(win.iterms) {
-		if win.iterms[i].tool_type == cv.ToolType.CommandBar && win.iterms[i].visible {
-			index = i
-			break
-		}
-	}
-	if index < 0 {
-		return
-	}
-	t := cv.ItermAbsoluteTransform(focus, index)
-	bar := cv.GetCommandBar(focus)
-	if bar == nil {
-		return
-	}
+	r := cv.CommandBarRect()
+	bar := cv.GetCommandBar()
+	// 输入框:底 = tab_hover_bg(浅于条底),顶边 = 主题 frame 色
+	DrawRect(r.position_x, r.position_y, r.width, r.height, theme.tab_hover_bg)
+	DrawRect(r.position_x, r.position_y, r.width, 1.0, theme.frame)
+	pad := f32(10)
+	base_y := r.position_y + m.ascent + (r.height - m.cell_height) * 0.5
+	// ':' 前缀(FPS 灰)
+	DrawText(uf, ":", r.position_x + pad, base_y, theme.fps_fg)
+	// 文本显示窗:[start, start+vis) 保持光标可见(v 按光标动态滑动)
+	vis := int((r.width - pad * 2 - m.cell_width) / m.cell_width)
 	text := string(bar.input[:bar.len])
-	// 控制台配色:不透明、与终端深底明显区分。
-	// 背景 = 终端 fg(浅),文字 = 终端 bg(深)—— 高对比反色,悬浮清晰。
-	bar_fg := theme.fg
-	bar_text := theme.bg
-	UiDrawCommandBar(t.position_x, t.position_y, t.width, t.height,
-		text, bar.cursor, bar_fg, bar_text, 1.0)
+	start := 0
+	if bar.len > vis {
+		start = clamp(bar.cursor - vis + 1, 0, bar.len - vis)
+	}
+	text_x := r.position_x + pad + m.cell_width * 1.2
+	DrawText(uf, text[start:], text_x, base_y, theme.tab_active_fg)
+	// 光标(竖线,500ms 相位同终端)
+	if cursorBlinkOn(5) {
+		cx := text_x + f32(bar.cursor - start) * m.cell_width
+		DrawRect(cx, r.position_y + 5, 1.5, r.height - 10, theme.cursor)
+	}
 }
 
 // 颜色混合:a 向 b 偏移 t(0..1),0xRRGGBB
@@ -247,7 +303,7 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 	if m.cell_width <= 0 || m.cell_height <= 0 {
 		return
 	}
-	t := cv.NodeContentTransform(node_h)
+	t := node.transform
 
 	// 打底背景(仅第 1 趟:背景批 → FBO → 背景 shader)
 	if bg {
@@ -303,10 +359,26 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 		}
 		// 第 2 趟:连体字形位图会溢出到相邻格(如 --- 的 32px 连体),
 		// 背景已在上趟定稿,此处只画字形。
+		// 字体变体:style key 变化才查询(变体 face / 合成兜底标志),run 内零查表
+		win_h := node.window_id
+		sty_key := u8(255)
+		fh : mem.Handle
+		bs, isyn : bool
 		for c in 0 ..< draw_limit {
 			cell := line.cells[c]
 			if cell.cp == 0 {
 				continue // 空白格/宽字符续列:无字形
+			}
+			key := u8(0)
+			if cell.bold {
+				key |= 1
+			}
+			if cell.italic {
+				key |= 2
+			}
+			if key != sty_key {
+				sty_key = key
+				fh, bs, isyn = cv.WindowFontVariant(win_h, cell.bold, cell.italic)
 			}
 			cx := console.origin_x + f32(c) * m.cell_width
 			cy := console.origin_y + f32(r) * m.cell_height
@@ -315,8 +387,11 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 				fg = cv.ResolveColor(cell.bg, theme.bg)
 			}
 			gid := draw_shaped[c]
-			drawCellGlyph(win.font_id, cell.cp, gid, draw_orig[c], cx, cy + m.ascent, fg, cell.bold)
+			// fh ≠ 主字体时连体 gid 属主字体表:强制普通 cp 路径
+			drawCellGlyph(fh, cell.cp, gid, draw_orig[c], cx, cy + m.ascent, fg, bs, isyn, fh != win.font_id)
 		}
+		// 装饰线(下划线/删除线/上划线):样式 run 合并,画在字形之上
+		drawDecoLine(line, col_limit, r, console, m, theme.fg)
 	}
 
 	// 光标(DECSCUSR):0/1 块(闪烁) 2 块 3/4 下划线 5/6 竖线。
@@ -352,7 +427,7 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 						cell := line.cells[int(console.cursor_col)]
 						if cell.cp != 0 {
 							// 粗体字符同样双描重绘(否则光标块下残留 1px 粗体边)
-							drawCellGlyph(win.font_id, cell.cp, 0, 0, cx, cy + m.ascent, theme.bg, cell.bold)
+							drawCellGlyph(win.font_id, cell.cp, 0, 0, cx, cy + m.ascent, theme.bg, false, false, false)
 						}
 					}
 				}
@@ -361,21 +436,84 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 	}
 }
 
-// 画一个字符字形:(x, y) = 基线。粗体 = 合成加粗:同字形向右 1px 双描
-// (alpha 叠加变实;不依赖字体的真粗体字形,任意字体立即生效)。
-// gid != 0 且是连体替换结果时按替换字形绘制,否则查普通字形;gid=0 = 强制普通路径。
-drawCellGlyph :: proc(font_h : mem.Handle, cp : rune, gid, orig_gid : u16, x, y : f32, color : u32, bold : bool) {
-	if gid != 0 && gid != orig_gid {
-		if bold {
-			DrawGlyphById(font_h, gid, x + 1, y, color)
+// 画一个字符字形:(x, y) = 基线。
+// 字体 = 变体选择结果(fh);bold_syn/italic_syn = 该维度合成兜底标志:
+//   bold_syn → 同字形向右 1px 双描(无真 Bold face 时;alpha 叠加变实);
+//   italic_syn → 位图错切(CPU 顶点 shear);
+// 变体字体(fh ≠ 主字体)时连体 gid 失效(gid 属主字体表),强制普通 cp 路径。
+drawCellGlyph :: proc(font_h : mem.Handle, cp : rune, gid, orig_gid : u16, x, y : f32, color : u32, bold_syn, italic_syn, syn_gid : bool) {
+	use_gid := !syn_gid && gid != 0 && gid != orig_gid
+	if use_gid {
+		if bold_syn {
+			DrawGlyphById(font_h, gid, x + 1, y, color, italic_syn)
 		}
-		DrawGlyphById(font_h, gid, x, y, color)
+		DrawGlyphById(font_h, gid, x, y, color, italic_syn)
 		return
 	}
-	if bold {
-		DrawRune(font_h, cp, x + 1, y, color)
+	if bold_syn {
+		DrawRune(font_h, cp, x + 1, y, color, italic_syn)
 	}
-	DrawRune(font_h, cp, x, y, color)
+	DrawRune(font_h, cp, x, y, color, italic_syn)
+}
+
+// 装饰线(下划线/删除线/上划线):样式 run 合并画线(跨 cell 连续不断),
+// 颜色 = span 前景色(渲染期解析);线位置/粗细取自字体 metrics(缺省兜底)。
+// 编码:dec = underline(0..2)| crossed<<2 | overline<<3
+drawDecoLine :: proc(line : ^cv.Line, col_limit : int, row : int, console : ^cv.Console, m : fnt.Metrics, theme_fg : u32) {
+	if col_limit <= 0 {
+		return
+	}
+	dec := 0
+	start := 0
+	color := u32(0)
+	have := false
+	flush :: proc(l : ^cv.Line, s, e : int, row : int, console : ^cv.Console, m : fnt.Metrics, dec : int, color : u32) {
+		if s >= e || dec == 0 {
+			return
+		}
+		x0 := console.origin_x + f32(s) * m.cell_width
+		x1 := console.origin_x + f32(e) * m.cell_width
+		base := console.origin_y + f32(row) * m.cell_height
+		baseline := base + m.ascent
+		u := dec & 3
+		if u != 0 { // 下划线(双 = 两条,相距 thick+1)
+			y := baseline + m.underline_pos
+			DrawRect(x0, y - m.underline_thick * 0.5, x1 - x0, m.underline_thick, color)
+			if u == 2 {
+				y2 := y + m.underline_thick + 2
+				DrawRect(x0, y2 - m.underline_thick * 0.5, x1 - x0, m.underline_thick, color)
+			}
+		}
+		if dec & (2 << 2) != 0 { // 删除线
+			y := baseline + m.strike_pos
+			DrawRect(x0, y - m.strike_thick * 0.5, x1 - x0, m.strike_thick, color)
+		}
+		if dec & (1 << 3) != 0 { // 上划线(贴格顶)
+			DrawRect(x0, base, x1 - x0, max(1.0, m.strike_thick), color)
+		}
+	}
+	for c in 0 ..< col_limit {
+		cell := &line.cells[c]
+		d := int(cell.underline)
+		if cell.crossed {
+			d |= 2 << 2
+		}
+		if cell.overline {
+			d |= 1 << 3
+		}
+		fg := cv.ResolveColor(cell.fg, theme_fg)
+		if !have {
+			have, dec, start, color = true, d, c, fg
+			continue
+		}
+		if d != dec || fg != color {
+			flush(line, start, c, row, console, m, dec, color)
+			dec, start, color = d, c, fg
+		}
+	}
+	if have {
+		flush(line, start, col_limit, row, console, m, dec, color)
+	}
 }
 
 // DECSCUSR 闪烁样式(Ps=1/3/5):500ms 亮、500ms 灭

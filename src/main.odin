@@ -42,7 +42,8 @@ main :: proc() {
 	}
 }
 
-// 初始化窗口布局(经用户接口):键位绑定 + 单窗 0,默认启动配置。
+// 初始化窗口布局(配置函数:userapi 是给用户/配置段落的接口,此处直接使用;
+// 运行期内部代码不绕用户接口,一律经 Get* 指针直接操作数据)。
 initWindows :: proc() -> bool {
 	// 键位绑定表(显式填充一次;查询纯读)
 	canvas.ClearKeyBindings()
@@ -53,9 +54,11 @@ initWindows :: proc() -> bool {
 	canvas.SetKeyBinding(.K, {.Alt}, canvas.ParsedCommand { kind = .FocusDir, fdir = .Up })
 	canvas.SetKeyBinding(.J, {.Alt}, canvas.ParsedCommand { kind = .FocusDir, fdir = .Down })
 
-	// 分屏
-	canvas.SetKeyBinding(.L, {.Alt, .Shift}, canvas.ParsedCommand { kind = .Split, dir = .LeftRight })
+	// 分屏(四方向,与焦点键位同构):新窗在左/下/上/右
+	canvas.SetKeyBinding(.H, {.Alt, .Shift}, canvas.ParsedCommand { kind = .Split, dir = .LeftRight, split_first = true })
 	canvas.SetKeyBinding(.J, {.Alt, .Shift}, canvas.ParsedCommand { kind = .Split, dir = .UpDown })
+	canvas.SetKeyBinding(.K, {.Alt, .Shift}, canvas.ParsedCommand { kind = .Split, dir = .UpDown, split_first = true })
+	canvas.SetKeyBinding(.L, {.Alt, .Shift}, canvas.ParsedCommand { kind = .Split, dir = .LeftRight })
 
 	// 交换(几何方向邻居)
 	canvas.SetKeyBinding(.H, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .Exchange, fdir = .Left })
@@ -65,6 +68,9 @@ initWindows :: proc() -> bool {
 
 	// 销毁焦点窗口
 	canvas.SetKeyBinding(.W, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .Destroy })
+
+	// 新建页签(WT 惯例;关页 = 关光当前页窗口自动清出)
+	canvas.SetKeyBinding(.T, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .PageNew })
 
 	// 历史翻页
 	canvas.SetKeyBinding(.PAGEUP, {.Shift}, canvas.ParsedCommand { kind = .ReviewUp })
@@ -88,7 +94,7 @@ initWindows :: proc() -> bool {
 	// 调试会话:cmd.exe(msys2 bash 在受限宿主下 CreateFileMapping 失败;
 	// 在你自己的终端会话里按环境换回 msys2_shell.cmd)
 	canvas.SetDefaultLaunch(
-		"cmd.exe",
+		"bash.exe",
 		"FiraCode Nerd Font Mono", 26)
 	// 第一页:页根 + 根窗(自动启动默认),成为当前页
 	page := canvas.PageNew()

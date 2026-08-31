@@ -62,7 +62,7 @@ main :: proc() {
 	best2 : time.Duration = 10 * time.Second
 	for _ in 0 ..< 3 {
 		// 每次重置:清空缓冲(避开历史裁剪影响)
-		cv.TermBufferClear(cv.ConsoleActiveTermBuffer(ch))
+		cv.TermBufferClear(cv.GetConsole(ch).active_term_buffer_id)
 		start := time.now()
 		cv.ConsoleFeed(ch, raw)
 		d := time.since(start)

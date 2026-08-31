@@ -31,7 +31,7 @@ main :: proc() {
 	cv.ConsoleFeed(ch, data)
 
 	c := cv.GetConsole(ch)
-	tb := cv.GetTermBuffer(cv.ConsoleActiveTermBuffer(ch))
+	tb := cv.GetTermBuffer(cv.GetConsole(ch).active_term_buffer_id)
 	fmt.println("rows:", c.rows, "cols:", c.cols, "lines:", len(tb.lines))
 	start := max(0, len(tb.lines) - int(c.rows))
 	for r in start ..< len(tb.lines) {

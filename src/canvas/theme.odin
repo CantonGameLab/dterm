@@ -113,12 +113,12 @@ DRACULA_THEME := Theme {
 	tab_hover_bg = 0x383A4E,
 }
 
-// 切换主题:下一帧渲染全部按新表解码(缓冲内容零重写)
+// userapi:整表替换(配置入口/main.initWindows);下一帧渲染全部按新表解码(缓冲零重写)
 SetTheme :: proc(t : Theme) {
 	current_theme = t
 }
 
-// 查询当前主题(定制项统一命名:Set<域>/Get<域>)
-GetTheme :: proc() -> Theme {
-	return current_theme
+// 主题数据指针:只读消费(渲染)/字段级修改都直接操作数据结构本身
+GetTheme :: proc() -> ^Theme {
+	return &current_theme
 }

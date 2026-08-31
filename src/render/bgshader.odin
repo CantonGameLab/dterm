@@ -30,10 +30,6 @@ SetBackgroundShaderEnabled :: proc(on : bool) {
 	bg_enabled = on
 }
 
-BackgroundShaderEnabled :: proc() -> bool {
-	return bg_enabled
-}
-
 // 读取默认背景 shader 文件并编译(render.Init 调用;失败 = 打印警告)
 InitBackgroundShader :: proc() -> bool {
 	data, err := os.read_entire_file_from_path(BG_SHADER_PATH, context.allocator)

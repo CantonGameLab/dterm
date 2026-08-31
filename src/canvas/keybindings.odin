@@ -49,67 +49,29 @@ Binding :: struct {
 	cmd : ParsedCommand,
 }
 
-// 默认绑定表(userapi 管理:SetKeyBinding/ClearKeyBindings 操作,查询纯读)
+// 默认绑定表(唯一实例):结构 = 槽数组 + 计数。读写经 GetKeyBindings 指针
+// 直接操作;userapi(SetKeyBinding/ClearKeyBindings/...)是面向用户的表操作接口。
 MAX_DEFAULT_BINDINGS :: 32
 
-default_bindings : [MAX_DEFAULT_BINDINGS]Binding
-keybinding_count : int
-
-// 绑定一套完整默认快捷键(main.initWindows 调用一次;全部经 userapi 填表):
-//   Alt+H/J/K/L    焦点左/下/上/右(vim 键位,下同)
-//   Alt+Shift+L/J  向右/下分屏
-//   Ctrl+Shift+H/L 与几何左/右邻居交换窗口内容
-//   Ctrl+Shift+K/J 与几何上/下邻居交换窗口内容
-//   Ctrl+Shift+W   销毁焦点窗口
-//   PageUp/Down    历史翻页
-//   F2             命令栏
-//   Ctrl+Shift+=/- 字号增大/减小
-// 调整分割比(factor)走命令栏字符串命令;滚动有鼠标滚轮,均不占键。
-// Shift 不得单独出现(与 Alt/Ctrl 伴生,避免误触发大写/序列键)。
-// 幂等 = ClearKeyBindings 清零重建(无状态判定;重复调用 = 重新填充)。
-InitDefaultKeyBindings :: proc() {
-	ClearKeyBindings()
-
-	// 焦点
-	SetKeyBinding(.H, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Left })
-	SetKeyBinding(.L, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Right })
-	SetKeyBinding(.K, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Up })
-	SetKeyBinding(.J, {.Alt}, ParsedCommand { kind = .FocusDir, fdir = .Down })
-
-	// 分屏
-	SetKeyBinding(.L, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .LeftRight })
-	SetKeyBinding(.J, {.Alt, .Shift}, ParsedCommand { kind = .Split, dir = .UpDown })
-
-	// 交换(几何方向邻居)
-	SetKeyBinding(.H, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Left })
-	SetKeyBinding(.L, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Right })
-	SetKeyBinding(.K, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Up })
-	SetKeyBinding(.J, {.Ctrl, .Shift}, ParsedCommand { kind = .Exchange, fdir = .Down })
-
-	// 销毁焦点窗口
-	SetKeyBinding(.W, {.Ctrl, .Shift}, ParsedCommand { kind = .Destroy })
-
-	// 历史翻页
-	SetKeyBinding(.PAGEUP, {.Shift}, ParsedCommand { kind = .ReviewUp })
-	SetKeyBinding(.PAGEDOWN, {.Shift}, ParsedCommand { kind = .ReviewDown })
-
-	// 命令栏
-	SetKeyBinding(.F2, {}, ParsedCommand { kind = .ToggleCommandBar })
-
-	// 字号
-	SetKeyBinding(.EQUALS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeUp })
-	SetKeyBinding(.MINUS, {.Ctrl, .Shift}, ParsedCommand { kind = .FontSizeDown })
-
+KeyBindings :: struct {
+	bindings : [MAX_DEFAULT_BINDINGS]Binding,
+	count : int,
 }
 
+key_bindings : KeyBindings
 
-// 查绑定:精确匹配 (key, mods);命中返回命令(表由 InitDefaultKeyBindings 填充)
+GetKeyBindings :: proc() -> ^KeyBindings {
+	return &key_bindings
+}
+
+// 查绑定:精确匹配 (key, mods);命中返回命令(表由 main 配置/用户 bind 命令填充)
 findBinding :: proc(sc : u32, mods : KeyMods) -> (Binding, bool) {
 	//if mods == {.Shift} {
 	//	return {}, false // Shift 单独 = 非法触发(不参与匹配)
 	//}
-	for i in 0 ..< keybinding_count {
-		b := &default_bindings[i]
+	kb := GetKeyBindings()
+	for i in 0 ..< kb.count {
+		b := &kb.bindings[i]
 		if u32(b.key) == sc && b.mods == mods {
 			return b^, true
 		}
@@ -173,10 +135,10 @@ ProcessMouse :: proc() {
 	}
 	// UI 绑定:点击聚焦;滚轮滚动历史(review)
 	if m.press != 0 {
-		SetFocus(node_h)
+		CurrentPage().focused = node_h
 	}
 	if m.wheel != 0 {
-		SetFocus(node_h)
+		CurrentPage().focused = node_h
 		// input 层语义:wheel 正 = 向上滚(SDL);向上翻历史 = ConsoleScroll(负)
 		ConsoleScroll(-int(m.wheel), node_h)
 	}
@@ -192,11 +154,11 @@ InputText :: proc(data : []byte) {
 
 // 焦点窗口的 console(绑定动作的目标)
 focusConsole :: proc() -> ^Console {
-	f := GetFocus()
-	if f.id == 0 {
+	p := CurrentPage()
+	if p == nil || p.focused.id == 0 {
 		return nil
 	}
-	win := NodeWindow(f)
+	win := NodeWindow(p.focused)
 	if win == nil {
 		return nil
 	}

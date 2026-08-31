@@ -12,30 +12,35 @@ import "core:strings"
 // ---------------------------------------------------------------------------
 // 默认启动配置(新建窗口时自动应用;cmd 留空 = 不自动启动)
 // ---------------------------------------------------------------------------
-// 状态属于用户接口层配置:API 设置生效于之后创建的窗口
+// 状态属于用户接口层配置:userapi 设置生效于之后创建的窗口
 // (CreateWindowTreeRoot / SplitNewWindow),对已有窗口不追溯。
 // cmd 非空但 font 为空时,LaunchConsole 因无字体失败(启动前必须可设字体);
 // 正常用法是 cmd+font+size 一起设置,或全部留空 = 窗口不启动。
-default_cmd : string
-default_font : string
-default_font_size : f32
-
-// 设置默认启动配置(cmd/font 传空串 = 对应项不自动应用)
-SetDefaultLaunch :: proc(cmd, font : string, size : f32) {
-	if default_cmd != "" {
-		delete(default_cmd)
-	}
-	if default_font != "" {
-		delete(default_font)
-	}
-	default_cmd = strings.clone(cmd)
-	default_font = strings.clone(font)
-	default_font_size = size
+// 内部读写 = GetDefaultLaunch() 指针直接操作字段(字符串所有权归设置方)。
+DefaultLaunch :: struct {
+	cmd : string,
+	font : string,
+	size : f32,
 }
 
-// 查询默认启动配置(cmd/font 为内部存储借用,只读)
-GetDefaultLaunch :: proc() -> (cmd, font : string, size : f32) {
-	return default_cmd, default_font, default_font_size
+default_launch : DefaultLaunch
+
+// userapi:设置默认启动配置(cmd/font 传空串 = 对应项不自动应用)
+SetDefaultLaunch :: proc(cmd, font : string, size : f32) {
+	if default_launch.cmd != "" {
+		delete(default_launch.cmd)
+	}
+	if default_launch.font != "" {
+		delete(default_launch.font)
+	}
+	default_launch.cmd = strings.clone(cmd)
+	default_launch.font = strings.clone(font)
+	default_launch.size = size
+}
+
+// 默认启动配置指针(原结构体;字段读写直接操作)
+GetDefaultLaunch :: proc() -> ^DefaultLaunch {
+	return &default_launch
 }
 
 // 新建窗口的自动应用:先字体后启动(先设字体,应用才能挂上)。
@@ -44,12 +49,13 @@ applyDefaultLaunch :: proc(node_h : mem.Handle) {
 	if node_h.id == 0 {
 		return
 	}
-	if default_font != "" {
-		SetWindowFont(default_font, default_font_size, node_h)
+	d := &default_launch
+	if d.font != "" {
+		SetWindowFont(d.font, d.size, node_h)
 	}
-	if default_cmd != "" {
-		if !LaunchConsole(default_cmd, node_h) {
-			fmt.eprintln("default launch failed:", default_cmd)
+	if d.cmd != "" {
+		if !LaunchConsole(d.cmd, node_h) {
+			fmt.eprintln("default launch failed:", d.cmd)
 		}
 	}
 }
@@ -59,31 +65,33 @@ applyDefaultLaunch :: proc(node_h : mem.Handle) {
 // ---------------------------------------------------------------------------
 // 添加/覆盖一条绑定(同 key+mods 覆盖已有);表满返回 false
 SetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods, cmd : ParsedCommand) -> bool {
-	for i in 0 ..< keybinding_count {
-		if default_bindings[i].key == key && default_bindings[i].mods == mods {
-			default_bindings[i].cmd = cmd
+	kb := GetKeyBindings()
+	for i in 0 ..< kb.count {
+		if kb.bindings[i].key == key && kb.bindings[i].mods == mods {
+			kb.bindings[i].cmd = cmd
 			return true
 		}
 	}
-	if keybinding_count >= MAX_DEFAULT_BINDINGS {
+	if kb.count >= MAX_DEFAULT_BINDINGS {
 		return false
 	}
-	default_bindings[keybinding_count] = Binding { key = key, mods = mods, cmd = cmd }
-	keybinding_count += 1
+	kb.bindings[kb.count] = Binding { key = key, mods = mods, cmd = cmd }
+	kb.count += 1
 	return true
 }
 
 // 清空绑定表(重复初始化 = 清零重建,无状态判定)
 ClearKeyBindings :: proc() {
-	keybinding_count = 0
+	GetKeyBindings().count = 0
 }
 
 // 移除一条绑定(不存在 = false;交换删除,顺序无关)
 UnsetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> bool {
-	for i in 0 ..< keybinding_count {
-		if default_bindings[i].key == key && default_bindings[i].mods == mods {
-			default_bindings[i] = default_bindings[keybinding_count - 1]
-			keybinding_count -= 1
+	kb := GetKeyBindings()
+	for i in 0 ..< kb.count {
+		if kb.bindings[i].key == key && kb.bindings[i].mods == mods {
+			kb.bindings[i] = kb.bindings[kb.count - 1]
+			kb.count -= 1
 			return true
 		}
 	}
@@ -92,9 +100,10 @@ UnsetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> bool {
 
 // 按 (key, mods) 查询绑定
 GetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> (Binding, bool) {
-	for i in 0 ..< keybinding_count {
-		if default_bindings[i].key == key && default_bindings[i].mods == mods {
-			return default_bindings[i], true
+	kb := GetKeyBindings()
+	for i in 0 ..< kb.count {
+		if kb.bindings[i].key == key && kb.bindings[i].mods == mods {
+			return kb.bindings[i], true
 		}
 	}
 	return {}, false
@@ -116,15 +125,17 @@ CreateWindowTreeRoot :: proc() -> mem.Handle {
 		}
 	}
 	applyDefaultLaunch(root)
-	SetFocus(root)
+	CurrentPage().focused = root // 焦点 = 页字段,直接操作
 	return root
 }
 
-// 对 id(或焦点)window 按 dir 分裂出新 window:自动分配窗口对象(空白窗格,
+// 对 id(或焦点)window 按轴分裂出新 window:自动分配窗口对象(空白窗格,
 // 后续 SetWindowFont/launch/工具直接可用);新窗成为焦点。
+// new_on_first = 新窗放首侧(左/上):分裂后交换左右子窗内容 ——
+// split left/up 即"新窗在左/上、原窗在右/下"(默认 false = 右/下)。
 // 树级 TreeNodeSplit 保持纯结构;窗口分配在用户语义层(SplitNewWindow)完成。
 // 新窗按默认启动配置应用(cmd 留空 = 空白窗格不启动)。
-SplitNewWindow :: proc(dir : SplitType, id : mem.Handle = {}) -> mem.Handle {
+SplitNewWindow :: proc(dir : SplitType, id : mem.Handle = {}, new_on_first := false) -> mem.Handle {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
 		return {}
@@ -135,7 +146,21 @@ SplitNewWindow :: proc(dir : SplitType, id : mem.Handle = {}) -> mem.Handle {
 	}
 	ensureWindow(new_h) // 分配窗口对象(建窗失败不阻塞 split;按需补建,幂等)
 	applyDefaultLaunch(new_h)
-	SetFocus(new_h)
+	// 新窗在首侧:交换两子窗内容(携带会话的窗口对象随节点走),焦点 = 首侧
+	if new_on_first {
+		if n := GetWindowTreeNode(new_h); n != nil {
+			if p := GetWindowTreeNode(n.parent_id); p != nil {
+				a := GetWindowTreeNode(p.left_son_id)
+				b := GetWindowTreeNode(p.right_son_id)
+				if a != nil && b != nil {
+					a.window_id, b.window_id = b.window_id, a.window_id
+					CurrentPage().focused = p.left_son_id
+					return p.left_son_id
+				}
+			}
+		}
+	}
+	CurrentPage().focused = new_h
 	return new_h
 }
 
@@ -155,38 +180,64 @@ DestroyWindow :: proc(id : mem.Handle = {}) -> bool {
 		// 关闭会话:先断引用再销毁(GenArray 句柄各自判定,DestroyConsole 只销毁本体)
 		clearConsoleRefs(win.console_id)
 		DestroyConsole(win.console_id)
-		// 字体不销毁:全局共享(同 path+size 复用,其他窗口可能仍引用)
+		// 窗口槽释放内含字体引用释放(ReleaseFont)
 		DestroyWindowSlot(win_h)
 	}
 	// 唯一剩余窗口(根):清空整个树
 	if node_h == WindowTreeRoot() {
 		ResetWindowTree()
-		SetFocus({})
+		CurrentPage().focused = {}
+		PageAutoClean() // 页内无窗口:非最后一页自动清出
 		return true
 	}
-	// 候选兄弟:先记录再摘树(摘除时的提升/吸收可能释放兄弟槽)
-	brother := mem.Handle {}
-	if parent := GetWindowTreeNode(node.parent_id); parent != nil {
-		brother = parent.left_son_id == node_h ? parent.right_son_id : parent.left_son_id
+	// 变动前:图 BFS 定位最近有窗叶,记录其 window_id —— 节点句柄会被摘除/
+	// 吸收(提升)改变,窗口对象 id 稳定,变动后按 id 全树找回。
+	nearest := nearestWindowLeaf(node_h)
+	target_win := mem.Handle {}
+	if nearest.id != 0 {
+		if nn := GetWindowTreeNode(nearest); nn != nil {
+			target_win = nn.window_id
+		}
 	}
 	TreeNodeRemove(node_h)
-	// 所有页中指向该节点的焦点自愈(后台页切回时焦点不悬挂)
-	PageClearFocus(node_h)
-	// 焦点落在被删窗:摘树后定焦点。兄弟被释放/变内部 → 回落根(根壳常驻)
-	if GetFocus() == node_h {
-		b := GetWindowTreeNode(brother)
-		if brother.id == 0 || b == nil || !b.is_leaf {
-			brother = WindowTreeRoot()
+	// 当前页焦点 = 被删节点:先按 window_id 找回最近窗(变动后树位置)。
+	// 必须在 PageClearFocus 之前 —— 它会把当前页焦点改成"整树第一个有窗叶",
+	// 导致本分支永远不命中(旧 bug:焦点跳"1"的根源)。
+	if CurrentPage().focused == node_h {
+		f := mem.Handle {}
+		if target_win.id != 0 {
+			stack : [MAX_TREE_NODE_SLOTS]mem.Handle
+			top := 1
+			stack[0] = WindowTreeRoot()
+			for top > 0 && f.id == 0 {
+				top -= 1
+				cur := stack[top]
+				n := GetWindowTreeNode(cur)
+				if n == nil {
+					continue
+				}
+				if n.is_leaf {
+					if n.window_id == target_win {
+						f = cur
+					}
+				} else {
+					if n.right_son_id.id != 0 && top < MAX_TREE_NODE_SLOTS {
+						stack[top] = n.right_son_id
+						top += 1
+					}
+					if n.left_son_id.id != 0 && top < MAX_TREE_NODE_SLOTS {
+						stack[top] = n.left_son_id
+						top += 1
+					}
+				}
+			}
 		}
-		if brother.id == 0 {
-			SetFocus({})
-			return true
-		}
-		if b := GetWindowTreeNode(brother); b != nil && !b.is_leaf {
-			brother = firstLeaf(brother)
-		}
-		SetFocus(brother)
+		CurrentPage().focused = f // 0 = 树内无此窗(空页),交由 PageAutoClean 清出
 	}
+	// 其余页指向该节点的焦点自愈(当前页已找回,不再命中;后台页切回不悬挂)
+	PageClearFocus(node_h)
+	// 摘除后非根路径也可能触发页空(兄弟提升后无窗口等):统一收尾检查
+	PageAutoClean()
 	return true
 }
 
@@ -228,17 +279,12 @@ ExchangeWindow :: proc(dir : FocusDirection, id : mem.Handle = {}) -> bool {
 
 // 设置先序叶子序号(1-based)认领的 split 节点 factor;无认领(最右叶/越界)返回 false。
 // 认领覆盖全部 split(每个内部节点恰一个认领叶),叶子序号即所有 split_factor
-// 的统一索引。
+// 的统一索引。认领表内嵌于 LeafSplitOwner(局部性,不落包状态)。
 SetSplitFactorLeaf :: proc(n : int, factor : f32) -> bool {
 	if n < 1 {
 		return false
 	}
-	ComputeLeafOrder()
-	i := n - 1
-	if i >= leaf_count {
-		return false
-	}
-	owner := leaf_split_owner[i]
+	owner := LeafSplitOwner(n)
 	if owner.id == 0 {
 		return false
 	}
@@ -246,43 +292,25 @@ SetSplitFactorLeaf :: proc(n : int, factor : f32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// 字体加载(表满自动回收)
+// 字体加载(表满 = 全部引用在用;引用归零的槽由 RefCounted 自动复用)
 // ---------------------------------------------------------------------------
-// 引用集 = 全部 Window.font_id(字体唯一真相 = 窗口;console 无副本)。
-// LoadFont 表满时:扫描引用集 → 清一个未被引用的旧档 → 重试。
+// 引用管理:LoadFont 调用方获得一个引用;窗口持有 font_id 期间引用有效,
+// 换字体/销毁窗口时 ReleaseFont(旧引用归零即需可复用)。字体表全局共享。
 
-loadFontEvict :: proc(path : string, size : f32) -> (mem.Handle, bool) {
-	if h, ok := fnt.LoadFont(path, size); ok {
-		return h, true
-	}
-	if !fnt.FontTableFull() {
-		return {}, false // 非表满失败(字号/文件),重试无意义
-	}
-	used : [fnt.MAX_FONT_SLOTS]mem.Handle
-	n := collectUsedFonts(&used)
-	if !fnt.EvictUnused(used[:n]) {
-		return {}, false // 全部在用:无可回收
-	}
-	return fnt.LoadFont(path, size)
+// 装载变体(失败 = 空引用;成功 = +1 引用;静默:变体缺失是常态)
+// 变体名 = font 包的族名/文件双形式推导(见 LoadFontVariant)
+loadVariant :: proc(name : string, size : f32, sfx_family, sfx_file : string) -> mem.Handle {
+	return fnt.LoadFontVariant(name, size, sfx_family, sfx_file)
 }
 
-collectUsedFonts :: proc(used : ^[fnt.MAX_FONT_SLOTS]mem.Handle) -> int {
-	n := 0
-	for i in 0 ..< MAX_WINDOW_SLOTS {
-		if w := mem.GetIndex(&windows, i); w != nil && w.font_id.id != 0 && n < fnt.MAX_FONT_SLOTS {
-			used[n] = w.font_id
-			n += 1
-		}
-	}
-	return n
-}
-
-// ---------------------------------------------------------------------------
-// 字体
-// ---------------------------------------------------------------------------
 // 设定 id(或焦点)window 的字体样式(加载字体文件;LaunchConsole 前必须设置)。
-// 节点无窗口时自动创建窗口。
+// 节点无窗口时自动创建窗口。变体:同族 "X Bold/Italic/Bold Italic" 兄弟文件,
+// 有 = 渲染用真 face,无 = 渲染合成(双描/斜切)兜底;font_input 留存原始名
+// (字号重载/继承用,字符串所有权归窗口)。
 SetWindowFont :: proc(path : string, size : f32, id : mem.Handle = {}) -> bool {
+	if len(path) == 0 {
+		return false // 空名称不是合法字体输入
+	}
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
 		fmt.eprintln("SWF: no window")
@@ -293,39 +321,45 @@ SetWindowFont :: proc(path : string, size : f32, id : mem.Handle = {}) -> bool {
 		fmt.eprintln("SWF: no win obj")
 		return false
 	}
-	new_font, ok := loadFontEvict(path, size)
+	new_font, ok := fnt.LoadFont(path, size)
 	if !ok {
 		fmt.eprintln("SWF: LoadFont failed:", path, size)
 		return false
 	}
-	// 字体全局共享(同 path+size 复用 LoadFont 返回同一 handle),
-	// 旧字体不销毁:其他窗口可能仍引用;仅窗口指针指向新字体。
-	// 字体唯一真相 = win.font_id(console 读取经窗口,无副本)
+	// 入参可能是本窗口旧 font_input(字号重载 = 自引用调用):先独立持有一份,
+	// 否则下方 releaseFontSet 释放旧名后再 clone 会读到悬垂内存
+	name := strings.clone(path)
+	// 变体装载(失败 = 空引用不阻塞主字体;静默,不刷错误日志)
+	new_bold := mem.Handle {}
+	new_italic := mem.Handle {}
+	new_bi := mem.Handle {}
+	if len(path) > 0 {
+		new_bold = loadVariant(path, size, "Bold", "Bold")
+		new_italic = loadVariant(path, size, "Italic", "Italic")
+		new_bi = loadVariant(path, size, "Bold Italic", "BoldItalic")
+	}
+	// 释放旧字体集引用 + 旧输入名;赋新(LoadFont 命中同字体时先 +1 后 -1,净零)
+	releaseFontSet(win)
 	win.font_id = new_font
+	win.font_bold = new_bold
+	win.font_italic = new_italic
+	win.font_bold_italic = new_bi
+	win.font_input = name
 	return true
 }
 
-// 设置 id(或焦点)window 的字体大小(保留字体文件;同 path 新 size 重新加载,
-// 按 (path,size) 去重共享;失败保留旧字体)
+// 设置 id(或焦点)window 的字体大小(重载完整字体集:同原始名新 size,
+// 变体同步重载;失败保留旧字体)
 SetWindowFontSize :: proc(size : f32, id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
 		return false
 	}
 	win := NodeWindow(node_h)
-	if win == nil || win.font_id.id == 0 {
+	if win == nil || win.font_id.id == 0 || win.font_input == "" {
 		return false // 未设字体
 	}
-	path := fnt.FontPath(win.font_id)
-	if len(path) == 0 {
-		return false
-	}
-	new_font, ok := loadFontEvict(path, size)
-	if !ok {
-		return false
-	}
-	win.font_id = new_font
-	return true
+	return SetWindowFont(win.font_input, size, node_h)
 }
 
 // 增量改字号(快捷键 FontSizeUp/Down 的绑定目标;步长 1)
@@ -338,7 +372,7 @@ AdjustFontSize :: proc(delta : f32, id : mem.Handle = {}) -> bool {
 	if win == nil || win.font_id.id == 0 {
 		return false
 	}
-	return SetWindowFontSize(fnt.FontSize(win.font_id) + delta, node_h)
+	return SetWindowFontSize(fnt.GetFont(win.font_id).size + delta, node_h)
 }
 
 // 清空 id(或焦点)window 的会话:销毁其 console + ConPTY,窗口与字体保留,
@@ -359,18 +393,13 @@ ClearWindowConsole :: proc(id : mem.Handle = {}) -> bool {
 	return true
 }
 
-// 断掉所有指向 console_h 的引用(窗口 console_id + 工具浮层 console_id)。
+// 断掉所有指向 console_h 的引用(窗口 console_id)。
 // 窗口层销毁会话前的第一步:避免悬挂句柄让"空闲窗口"被误判占用。
 clearConsoleRefs :: proc(h : mem.Handle) {
 	for i in 0 ..< MAX_WINDOW_SLOTS {
 		if w := mem.GetIndex(&windows, i); w != nil {
 			if w.console_id == h {
 				w.console_id = {}
-			}
-			for &it in w.iterms {
-				if it.console_id == h {
-					it.console_id = {}
-				}
 			}
 		}
 	}
@@ -410,8 +439,8 @@ LaunchConsole :: proc(cmd : string, id : mem.Handle = {}) -> bool {
 			fmt.eprintln("LC: no win obj (new)")
 			return false
 		}
-		win2.font_id = win.font_id // 继承字体(已有 console 说明已设字体)
-		SetFocus(new_h)
+		inheritFontSet(win2, win) // 继承完整字体集(已有 console 说明已设字体);引用 ×4
+		CurrentPage().focused = new_h
 		node_h, win = new_h, win2
 	} else {
 		win.console_id = {}
@@ -511,9 +540,12 @@ PollSessions :: proc() -> bool {
 			if console == nil {
 				continue // 空窗口/悬挂引用,无会话
 			}
-			// 会话结束 = 读线程 dead(管道断开)。Job 活跃进程数不可靠:
-			// msys2 等进程会脱离我们创建的 Job(JobActiveProcesses 恒 0,会话仍活)。
-			if !ct.IsReadThreadAlive(console.conpty_handle) {
+			// 会话结束 = 主进程退出(GetExitCodeProcess,最终信号)或读线程 dead
+			// (管道断开),任一即结束。不能只信读线程:ConPTY 的 conhost 可能保活
+			// 管道写端(cmd exit 场景 ReadFile 永不 EOF),只信 Job 又会误杀
+			// 脱离 Job 的 msys2 —— 主进程退出与管道断开双信号取或。
+			if !ct.IsChildAlive(console.conpty_handle) ||
+			   !ct.IsReadThreadAlive(console.conpty_handle) {
 				ended[ended_count] = SessionEnded { node_h = node_h, auto_close = win.auto_close }
 				ended_count += 1
 			}
@@ -612,7 +644,11 @@ SetFocusWindow :: proc(id : mem.Handle) -> bool {
 	if GetWindowTreeNode(id) == nil {
 		return false
 	}
-	SetFocus(id)
+	p := CurrentPage()
+	if p == nil {
+		return false
+	}
+	p.focused = id
 	return true
 }
 
@@ -626,13 +662,17 @@ FocusMove :: proc(dir : FocusDirection, id : mem.Handle = {}) -> bool {
 	if target.id == 0 {
 		return false
 	}
-	SetFocus(target)
+	CurrentPage().focused = target
 	return true
 }
 
 // 查询当前焦点 window(节点 handle)
 GetFocusWindow :: proc() -> mem.Handle {
-	return GetFocus()
+	p := CurrentPage()
+	if p == nil {
+		return {}
+	}
+	return p.focused
 }
 
 // ---------------------------------------------------------------------------
@@ -653,6 +693,10 @@ resolveWindow :: proc(id : mem.Handle) -> mem.Handle {
 	if id.id != 0 {
 		return id
 	}
-	return GetFocus()
+	p := CurrentPage()
+	if p == nil {
+		return {}
+	}
+	return p.focused
 }
 

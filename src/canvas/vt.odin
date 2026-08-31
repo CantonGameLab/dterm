@@ -696,12 +696,17 @@ vtSgr :: proc(console_h : mem.Handle, p : ^Parser) {
 			style = { fg = DEFAULT_COLOR, bg = DEFAULT_COLOR }
 		case 1: style.bold = true
 		case 3: style.italic = true
-		case 4: style.underline = true
+		case 4: style.underline = 1
 		case 7: style.reverse = true
+		case 9: style.crossed = true
+		case 21: style.underline = 2 // 双下划线
 		case 22: style.bold = false
 		case 23: style.italic = false
-		case 24: style.underline = false
+		case 24: style.underline = 0
 		case 27: style.reverse = false
+		case 29: style.crossed = false
+		case 53: style.overline = true
+		case 55: style.overline = false
 		case 30 ..= 37: style.fg = colorIndex(pp - 30)
 		case 38, 48: // 扩展色:分号式 38;2;r;g;b / 38;5;n;冒号式 38:2::r:g:b / 38:5::n
 			if int(p.num_subparams[i]) > 1 {

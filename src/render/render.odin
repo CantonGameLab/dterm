@@ -115,13 +115,11 @@ Init :: proc() -> bool {
 	u_screen_size = gl.GetUniformLocation(program, "uScreenSize")
 	initBatch()
 	initWhiteTexture()
-	UiInit() // UI 层(nanovg);失败则 UI 禁用,不影响主渲染
 	InitBackgroundShader() // 读 resource/shader/background.frag(可先用 SetBackgroundShader 自愈)
 	return true
 }
 
 Quit :: proc() {
-	UiQuit()
 	BackgroundShaderQuit()
 	gl.DeleteProgram(program)
 	gl.DeleteShader(main_vs)
@@ -154,10 +152,6 @@ vsync_on : bool
 SetVSync :: proc(on : bool) {
 	vsync_on = on
 	s3.GL_SetSwapInterval(i32(on)) // 0 = 关(交换不等待),1 = 开(垂直同步)
-}
-
-VSyncEnabled :: proc() -> bool {
-	return vsync_on
 }
 
 // ---------------------------------------------------------------------------
@@ -225,27 +219,32 @@ DrawRectBg :: proc(x, y, w, h : f32, color : u32) {
 	}
 }
 
-// 单字形,(x, y) = 基线位置;返回前进宽,无字形时按格宽
-DrawRune :: proc(font_h : mem.Handle, cp : rune, x, y : f32, color : u32) -> (advance : f32) {
+// 单字形,(x, y) = 基线位置;返回前进宽,无字形时按格宽。
+// italic = 仿真斜体(位图按行错切,见 pushQuad 的 skew)
+DrawRune :: proc(font_h : mem.Handle, cp : rune, x, y : f32, color : u32, italic := false) -> (advance : f32) {
 	g, ok := fnt.GetGlyph(font_h, cp)
 	if !ok {
 		return fnt.GetMetrics(font_h).cell_width
 	}
-	return pushGlyph(font_h, g, x, y, color)
+	return pushGlyph(font_h, g, x, y, color, italic)
 }
 
 // 内部 glyph id 字形(连体替换结果),(x, y) = 基线位置
-DrawGlyphById :: proc(font_h : mem.Handle, gid : u16, x, y : f32, color : u32) -> (advance : f32) {
+DrawGlyphById :: proc(font_h : mem.Handle, gid : u16, x, y : f32, color : u32, italic := false) -> (advance : f32) {
 	g, ok := fnt.GetGlyphById(font_h, gid)
 	if !ok {
 		return fnt.GetMetrics(font_h).cell_width
 	}
-	return pushGlyph(font_h, g, x, y, color)
+	return pushGlyph(font_h, g, x, y, color, italic)
 }
 
-pushGlyph :: proc(font_h : mem.Handle, g : fnt.Glyph, x, y : f32, color : u32) -> (advance : f32) {
+// 仿真斜体剪切系数(字形底部相对顶部错切,≈11°)
+ITALIC_SHEAR :: f32(0.2)
+
+pushGlyph :: proc(font_h : mem.Handle, g : fnt.Glyph, x, y : f32, color : u32, italic := false) -> (advance : f32) {
 	tex := fnt.GetAtlasTexture(font_h)
-	pushQuad(tex, x + g.xoff, y + g.yoff, x + g.xoff + g.bitmap_w, y + g.yoff + g.bitmap_h, g.uv0_x, g.uv0_y, g.uv1_x, g.uv1_y, color)
+	skew := italic ? ITALIC_SHEAR : f32(0)
+	pushQuad(tex, x + g.xoff, y + g.yoff, x + g.xoff + g.bitmap_w, y + g.yoff + g.bitmap_h, g.uv0_x, g.uv0_y, g.uv1_x, g.uv1_y, color, skew)
 	return g.advance
 }
 
@@ -263,7 +262,7 @@ DrawText :: proc(font_h : mem.Handle, text : string, x, y : f32, color : u32) {
 	}
 }
 
-pushQuad :: proc(tex : u32, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32) {
+pushQuad :: proc(tex : u32, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32, skew : f32 = 0) {
 	if tex != current_tex {
 		flushBatch()
 		current_tex = tex
@@ -272,7 +271,7 @@ pushQuad :: proc(tex : u32, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32) {
 	if quad_count >= MAX_QUADS {
 		flushBatch()
 	}
-	writeQuad(&quad_verts, quad_count, x0, y0, x1, y1, u0, v0, u1, v1, color)
+	writeQuad(&quad_verts, quad_count, x0, y0, x1, y1, u0, v0, u1, v1, color, skew)
 	quad_count += 1
 }
 
@@ -290,19 +289,21 @@ pushBgQuad :: proc(x0, y0, x1, y1 : f32, color : u32) {
 
 // 顶点写入(主批/背景批共用;坐标取整对齐像素网格:字形位图内容已含亚像素偏移
 // (sub_x 相位补偿),四舍五入后 1:1 采样清晰,且字形回到设计位置(floor 会整体
-// 左移 1px,让贴格子边缘的圆角字符相对高亮背景错位)
-writeQuad :: proc(verts : ^[MAX_QUADS * 6]Vertex, q : int, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32) {
+// 左移 1px,让贴格子边缘的圆角字符相对高亮背景错位)。
+// skew = 仿真斜体:底部顶点相对顶部错切 x += skew*高度(梯形);0 = 矩形
+writeQuad :: proc(verts : ^[MAX_QUADS * 6]Vertex, q : int, x0, y0, x1, y1, u0, v0, u1, v1 : f32, color : u32, skew : f32 = 0) {
 	fx0, fy0 := math.round(x0), math.round(y0)
 	fx1, fy1 := math.round(x1), math.round(y1)
+	dx := skew * (fy1 - fy0) // 底部相对顶部的 x 错切
 	r := f32(color >> 16 & 0xFF) / 255
 	g := f32(color >> 8 & 0xFF) / 255
 	b := f32(color & 0xFF) / 255
 	base := q * 6
 	verts[base + 0] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
 	verts[base + 1] = Vertex { fx1, fy0, u1, v0, r, g, b, 1 }
-	verts[base + 2] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
-	verts[base + 3] = Vertex { fx1, fy1, u1, v1, r, g, b, 1 }
-	verts[base + 4] = Vertex { fx0, fy1, u0, v1, r, g, b, 1 }
+	verts[base + 2] = Vertex { fx1 + dx, fy1, u1, v1, r, g, b, 1 }
+	verts[base + 3] = Vertex { fx1 + dx, fy1, u1, v1, r, g, b, 1 }
+	verts[base + 4] = Vertex { fx0 + dx, fy1, u0, v1, r, g, b, 1 }
 	verts[base + 5] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
 }
 

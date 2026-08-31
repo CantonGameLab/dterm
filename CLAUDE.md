@@ -4,7 +4,12 @@ Windows 终端模拟器(Odin + SDL3 + OpenGL 4.4 core + ConPTY)。完整规范�
 
 ## 编码规则
 
-- **纯赋值/纯读取不提供接口**:通过 Get 途径(返回指针)直接读写字段。只有设计运算抽象(校验、clamp、联动副作用如重算布局)时才暴露 Setter/Getter。
+- **接口 = 不变式守卫**:数据有结构正确性约束(树:无环/单连通/父-子镜像/叶判定)时,用成套接口(树的 `linkSon/unlinkSon/replaceChild`)保证"经接口建/改必合法",禁止裸写结构字段;**孤立属性**(无约束单字段)不设接口,**禁止值拷贝 getter**(字段复制返回 = `NodeContentTransform` 式,一律删)。
+- **局部性最大化**:算法(DFS/BFS/搜索)的辅助状态(表/栈/标记)与辅助过程全部定义在入口函数内部(迭代显式栈代替递归),不污染包命名空间;包级只留数据/接口/跨调用生命周期状态。
+- **纯赋值/纯读取不提供接口**:数据获取 = 原结构体指针 Get(`GetTheme() ^Theme`)或句柄解码(`GetConsole/GetFont`)后直接读写字段;只有运算抽象(校验、clamp、联动副作用如重算布局)才暴露函数。
+- **userapi 分层**:`Set<域>`/`Get<域>`/`Reset<域>` 家族是给用户的接口(命令栏/绑定/**main.initWindows 配置段落**),保留;程序内部代码不绕 userapi,一律 `GetXxx()` 指针直改数据。
+- **禁止绕过池抽象**:不许 `池.data[句柄.id]` 直索引、不许手拼 `Handle{id, generation}`、不许裸读 `next/pool/generations`;句柄只能 `Alloc/AllocAt/GetHandle` 产出,取值 `Get/GetIndex`,枚举 `Alive(i)`+`GetIndex/GetHandle(i)` 配对。
+- **引用计数纪律**(RefCounted 公用数据):`LoadFont` = +1,持有者释放 = -1(归零句柄失效、槽保留由 Alloc 复用);最后释放方做深析构;释放必须经模块封装(`ReleaseFont`),不许直接 `mem.Free`。
 - 公开函数 PascalCase;外部库绑定(api.odin)不重命名。
 - 函数间传 u32 id 句柄,count 从 1 起,0 = null/空槽。
 - 注释精简,只写非显然逻辑(中文)。

@@ -5,7 +5,7 @@ package main
 import "core:fmt"
 import s3 "vendor:sdl3"
 import gl "vendor:OpenGL"
-import fnt "../font"
+import fnt "../../src/font"
 import "core:c"
 
 main :: proc() {
@@ -45,7 +45,7 @@ main :: proc() {
 		fmt.eprintln("LoadFont FAILED")
 		return
 	}
-	defer fnt.DestroyFont(font_h)
+	defer fnt.ReleaseFont(font_h)
 
 	m := fnt.GetMetrics(font_h)
 	tex := fnt.GetAtlasTexture(font_h)

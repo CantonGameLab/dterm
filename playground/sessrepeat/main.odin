@@ -28,7 +28,7 @@ main :: proc() {
 		hist := fmt.tprintf("history filler line %d\r\n", i)
 		cv.ConsoleFeed(ch, transmute([]byte)hist)
 	}
-	tb0 := cv.GetTermBuffer(cv.ConsoleActiveTermBuffer(ch))
+	tb0 := cv.GetTermBuffer(cv.GetConsole(ch).active_term_buffer_id)
 	fmt.println("prefilled lines:", len(tb0.lines))
 
 	for round in 1 ..= 3 {
@@ -40,7 +40,7 @@ main :: proc() {
 		cv.ConsoleFeed(ch, data)
 
 		c := cv.GetConsole(ch)
-		tb := cv.GetTermBuffer(cv.ConsoleActiveTermBuffer(ch))
+		tb := cv.GetTermBuffer(cv.GetConsole(ch).active_term_buffer_id)
 		fmt.printf("== round %d: rows=%d cols=%d lines=%d cursor=(%d,%d)\n",
 			round, c.rows, c.cols, len(tb.lines), c.cursor_row, c.cursor_col)
 		// 可视区快照:base+r(屏幕行)→ 物理行

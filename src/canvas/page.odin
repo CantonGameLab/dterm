@@ -10,16 +10,21 @@ import "core:fmt"
 
 MAX_PAGE_SLOTS :: 16
 
-// 底部页签条(状态栏雏形)高度;树区高度 = 窗口物理高 - BAR
-TAB_BAR_HEIGHT :: f32(28)
+// 底部页签条(状态栏雏形)高度;树区高度 = 窗口物理高 - BAR。
+// 页签矩形 = 满条高:激活页签背景直通条上下边,与内容区背景连续(WT 式背景延伸)。
+TAB_BAR_HEIGHT :: f32(32)
 
-// 页签条内页签高度/内边距(渲染与命中共用)
-TAB_H :: f32(22)
+// 页签条内页签尺寸(渲染与命中共用)
 TAB_PAD_X :: f32(12)
 TAB_MIN_W :: f32(80)
 TAB_MAX_W :: f32(240)
 TAB_GAP :: f32(3)
 NEW_TAB_W :: f32(26) // "+" 新建按钮宽
+
+// 条内右侧工具区(固定宽,从右往左):FPS 标签 + 命令栏输入框
+CMD_VIEW_W :: f32(320) // 命令栏输入框宽
+FPS_TAG_W :: f32(64) // FPS 标签宽
+TOOL_GAP :: f32(6) // 工具区与页签区最小间距
 
 Page :: struct {
 	title : [32]u8, // 页标题(定长,截断;默认 = 页序号)
@@ -88,6 +93,29 @@ PageDestroy :: proc(page_h : mem.Handle) -> bool {
 		}
 	}
 	return true
+}
+
+// 自动清出:页内所有窗口已销毁(用户关光/会话 auto_close)→ 自动关页;
+// 最后一页保留(空态等主循环判定退出)。当前页销毁后重新遍历,直至稳定。
+PageAutoClean :: proc() {
+	for {
+		if PageCount() <= 1 {
+			return // 最后一页保留
+		}
+		cleaned := false
+		for pi in 1 ..< MAX_PAGE_SLOTS {
+			if p := mem.GetIndex(&pages, pi); p != nil {
+				if firstLeafWithWindow(p.tree_root).id == 0 {
+					PageDestroy(mem.GetHandle(&pages, pi))
+					cleaned = true
+					break // 页销毁后句柄/焦点迁移,重新遍历
+				}
+			}
+		}
+		if !cleaned {
+			return
+		}
+	}
 }
 
 // 整树销毁:leaf 窗口(会话 → 槽)先清,再递归释放节点(含根)
@@ -180,6 +208,12 @@ PageCurrent :: proc() -> mem.Handle {
 	return current_page
 }
 
+// 当前页数据指针(原结构体):页字段(焦点/标题/根)读写直接经它操作,
+// 不再提供 Set/Get 包装;无页 = nil(主循环下页恒存在)。
+CurrentPage :: proc() -> ^Page {
+	return mem.Get(&pages, current_page)
+}
+
 // 存活序第 n 个页(1-based)
 PageByIndex :: proc(n : int) -> mem.Handle {
 	idx := 0
@@ -243,12 +277,12 @@ PageTabRect :: proc(index : int) -> (rect : Transform, ok : bool) {
 	}
 	w := tabWidth(page_h)
 	x := tabAreaX(index)
-	bar_top := f32(Window_Height) // 内容区底 = 条顶
+	bar_top := f32(Window_Height) // 内容区底 = 条顶;页签满条高(背景延伸)
 	return Transform {
 		position_x = x,
-		position_y = bar_top + (TAB_BAR_HEIGHT - TAB_H) * 0.5,
+		position_y = bar_top,
 		width = w,
-		height = TAB_H,
+		height = TAB_BAR_HEIGHT,
 	}, true
 }
 
@@ -257,9 +291,9 @@ NewTabRect :: proc() -> Transform {
 	bar_top := f32(Window_Height)
 	return Transform {
 		position_x = tabAreaX(pageCountAlive()) + TAB_GAP,
-		position_y = bar_top + (TAB_BAR_HEIGHT - TAB_H) * 0.5,
+		position_y = bar_top,
 		width = NEW_TAB_W,
-		height = TAB_H,
+		height = TAB_BAR_HEIGHT,
 	}
 }
 
@@ -294,9 +328,35 @@ pageCountAlive :: proc() -> int {
 	return PageCount()
 }
 
+// 命令栏输入框矩形(条内右侧;可见时绘制/命中保护用)
+CommandBarRect :: proc() -> Transform {
+	bar_top := f32(Window_Height)
+	return Transform {
+		position_x = f32(Window_Width) - FPS_TAG_W - TOOL_GAP - CMD_VIEW_W,
+		position_y = bar_top,
+		width = CMD_VIEW_W,
+		height = TAB_BAR_HEIGHT,
+	}
+}
+
+// FPS 标签矩形(条内最右角)
+FpsTagRect :: proc() -> Transform {
+	bar_top := f32(Window_Height)
+	return Transform {
+		position_x = f32(Window_Width) - FPS_TAG_W,
+		position_y = bar_top,
+		width = FPS_TAG_W,
+		height = TAB_BAR_HEIGHT,
+	}
+}
+
 // 页签条命中:返回命中元素(index 0-based 页签 / -1 = "+" 按钮)
 TabBarHit :: proc(x, y : f32) -> (kind : TabHitKind, index : int) {
 	if y < f32(Window_Height) {
+		return .None, -1
+	}
+	// 右侧工具区(命令栏/FPS)优先排除:与页签区互不侵入
+	if cr := CommandBarRect(); x >= cr.position_x {
 		return .None, -1
 	}
 	n := pageCountAlive()

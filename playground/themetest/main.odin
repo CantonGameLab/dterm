@@ -29,7 +29,7 @@ main :: proc() {
 	check("index 255 → gray EE", cv.ResolveColor(index(255), 0), u32(0xEEEEEE))
 
 	fmt.println("== SetTheme 生效 ==")
-	t2 := t
+	t2 := t^
 	t2.ansi[1] = 0xABCDEF
 	t2.focus_border = 0x112233
 	cv.SetTheme(t2)
@@ -54,7 +54,7 @@ main :: proc() {
 	seq := "\x1b[31mR\x1b[38;5;196mG\x1b[38;2;1;2;3mB\x1b[0mX"
 	cv.ConsoleFeed(ch, transmute([]u8)seq)
 
-	tb := cv.GetTermBuffer(cv.ConsoleActiveTermBuffer(ch))
+	tb := cv.GetTermBuffer(cv.GetConsole(ch).active_term_buffer_id)
 	if tb == nil || len(tb.lines) == 0 || len(tb.lines[0].cells) < 4 {
 		fmt.println("buffer shape failed")
 		return
@@ -64,4 +64,17 @@ main :: proc() {
 	check("G fg = index 196", cells[1].fg, index(196))
 	check("B fg = rgb 010203", cells[2].fg, u32(0x010203))
 	check("X fg = default", cells[3].fg, u32(0xFFFFFFFF))
+
+	fmt.println("== SGR 样式位(粗/斜/下划线/删除线/双下划线/上划线)==")
+	style_seq := "\x1b[1mA\x1b[3mB\x1b[4mC\x1b[9mD\x1b[21mE\x1b[53mF\x1b[0mX"
+	cv.ConsoleFeed(ch, transmute([]u8)style_seq)
+	scells := tb.lines[0].cells // 同屏追加:无 LF,字符顺序续写
+	check("A bold", scells[4].bold, true)
+	check("B italic", scells[5].italic, true)
+	check("C underline", scells[6].underline, u8(1))
+	check("D crossed", scells[7].crossed, true)
+	check("E double underline", scells[8].underline, u8(2))
+	check("F overline", scells[9].overline, true)
+	check("X reset all", scells[10].bold == false && scells[10].italic == false &&
+		scells[10].underline == 0 && scells[10].crossed == false && scells[10].overline == false, true)
 }

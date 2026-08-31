@@ -24,7 +24,7 @@ main :: proc() {
 		fmt.eprintln("LoadFont failed")
 		return
 	}
-	defer fnt.DestroyFont(font_h)
+	defer fnt.ReleaseFont(font_h)
 
 	quit := false
 	for !quit {

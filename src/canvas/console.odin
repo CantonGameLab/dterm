@@ -16,7 +16,7 @@ MAX_BUFFERS_PER_CONSOLE :: 8
 Console :: struct {
 	rows, cols : u16, // 目标网格尺寸(布局趟真源,每帧由窗口几何重算)
 	pty_rows, pty_cols : u16, // ConPTY 已应用尺寸(尺寸应用趟与 rows/cols 比较判变化)
-	origin_x, origin_y : f32, // 居中后网格左上角(iterm 坐标空间);每帧由 ConsoleUpdateLayout 重算
+	origin_x, origin_y : f32, // 居中后网格左上角(内容区坐标空间);每帧由 ConsoleUpdateLayout 重算
 	cursor_row, cursor_col : u16, // 指向 active buffer 的物理行
 
 	vt : VtState,
@@ -75,14 +75,6 @@ CreateConsole :: proc(rows, cols : u16, conpty_handle : mem.Handle) -> (h : mem.
 
 GetConsole :: proc(h : mem.Handle) -> ^Console {
 	return mem.Get(&consoles, h)
-}
-
-ConsoleActiveTermBuffer :: proc(console_h : mem.Handle) -> mem.Handle {
-	console := GetConsole(console_h)
-	if console == nil {
-		return {}
-	}
-	return console.active_term_buffer_id
 }
 
 // 销毁 console 本体:会话(读线程 + ConPTY)+ 视口。

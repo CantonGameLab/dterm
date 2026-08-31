@@ -1,5 +1,8 @@
 // 字体系统:rune → 可渲染字形(灰度位图入 GL 图集 + 度量)。
-// 对外 5 个函数:LoadFont / DestroyFont / GetGlyph / GetMetrics / GetAtlasTexture。
+// 对外接口:LoadFont / RetainFont / ReleaseFont / GetGlyph / GetMetrics / GetAtlasTexture。
+// 引用计数表(公用数据):同 (path,size) 共享;LoadFont = 获得一个引用(+1),
+// 持有者不再需要时 ReleaseFont(-1);归零的槽留待 Alloc 复用,UI 字体等
+// 单例持有者引用 > 0,不会被复用顶掉。
 // 懒光栅化:字形首次用到才 stbtt 渲染,入图集缓存;主字体缺字自动走中文 fallback(同一图集)。
 // 槽位数组 + id 句柄:count 从 1 起,id 0 = 空;跨层一律传 Handle,GetFont(h) 拿指针。
 package font
@@ -30,6 +33,11 @@ Metrics :: struct {
 	cell_width : f32, // 等宽格宽
 	cell_height : f32, // 行高
 	ascent : f32, // 基线相对格顶的偏移
+	// 装饰线参数:相对基线的像素偏移(正 = 基线下方;渲染层画线用,缺省兜底)
+	underline_pos : f32, // 下划线中心(双线 = 两条相隔 thick 的细线)
+	underline_thick : f32,
+	strike_pos : f32, // 删除线中心(通常基线以上 = 负值)
+	strike_thick : f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +106,9 @@ Font :: struct {
 	ascent : f32,
 	path : string, // 加载路径(去重键:同 path+size 复用,不重复加载)
 	size : f32, // 字号(去重键)
+	// 装饰线参数(像素,相对基线;源 = post 表 underline + OS/2 strikeout,缺省兜底)
+	underline_pos, underline_thick : f32,
+	strike_pos, strike_thick : f32,
 	slots : [dynamic]GlyphSlot,
 	slot_count : u32,
 	atlas : Atlas,
@@ -105,7 +116,7 @@ Font :: struct {
 	shape_cache_next : u32,
 }
 
-fonts : mem.GenArray(MAX_FONT_SLOTS, Font)
+fonts : mem.RefCounted(MAX_FONT_SLOTS, Font)
 
 // ---------------------------------------------------------------------------
 // 对外接口
@@ -333,24 +344,7 @@ resolveFontPath :: proc(path_or_name : string) -> (path : string, is_alloc : boo
 }
 
 GetFont :: proc(h : mem.Handle) -> ^Font {
-	return mem.Get(&fonts, h)
-}
-
-// 查询字号/路径(user API 改大小用;句柄无效返回 0/"")
-FontSize :: proc(h : mem.Handle) -> f32 {
-	font := GetFont(h)
-	if font == nil {
-		return 0
-	}
-	return font.size
-}
-
-FontPath :: proc(h : mem.Handle) -> string {
-	font := GetFont(h)
-	if font == nil {
-		return ""
-	}
-	return font.path
+	return mem.RcGet(&fonts, h)
 }
 
 // ---------------------------------------------------------------------------
@@ -422,6 +416,38 @@ cellAndBaseline :: proc(f : ^Face) -> (cell_h, baseline : f32) {
 	return
 }
 
+// 装饰线度量(像素,相对基线;正 = 基线下方):
+//   下划线 = post 表 underlinePosition/underlineThickness(设计单位 → *scale);
+//   删除线 = OS/2 yStrikeoutPosition/yStrikeoutSize;
+//   表缺失/零值 → 缺省(下划线 = 基线下方 cell 的 12%,删除线 = cell 中线,厚 ≥1)。
+decoMetrics :: proc(f : ^Face, cell_h : f32) -> (upos, uthick, spos, sthick : f32) {
+	upos, uthick = cell_h * 0.12, 1
+	spos, sthick = -cell_h * 0.10, 1
+	if po := sfntTableOffset(f.data, f.sfnt_off, "post"); po >= 0 && po + 10 <= len(f.data) {
+		if p := i16be(f.data, po + 6); p != 0 { // underlinePosition
+			upos = f32(p) * f.scale
+		}
+		if p := i16be(f.data, po + 8); p > 0 { // underlineThickness
+			uthick = f32(p) * f.scale
+		}
+	}
+	if o2 := sfntTableOffset(f.data, f.sfnt_off, "OS/2"); o2 >= 0 && o2 + 30 <= len(f.data) {
+		if p := i16be(f.data, o2 + 28); p != 0 { // yStrikeoutPosition
+			spos = f32(p) * f.scale
+		}
+		if p := i16be(f.data, o2 + 26); p != 0 { // yStrikeoutSize
+			sthick = f32(p) * f.scale
+		}
+	}
+	if uthick < 1 {
+		uthick = 1
+	}
+	if sthick < 1 {
+		sthick = 1
+	}
+	return
+}
+
 // 系统字体目录(Windows)
 SYSTEM_FONT_DIR :: "C:\\Windows\\Fonts\\"
 
@@ -431,27 +457,32 @@ SYSTEM_FONT_DIR :: "C:\\Windows\\Fonts\\"
 // 输入 path_or_name:优先当作字体名去系统目录找(`${SYSTEM_FONT_DIR}name.ttf/.otf/.ttc`),
 // 找不到再当作完整路径加载。
 // 去重:同 (path, size) 直接返回已有字体(字体全局共享,不重复加载/不随窗口销毁)。
-LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1) -> (h : mem.Handle, ok : bool) {
+// quiet = 失败不打印(变体猜测失败是常态,不刷日志)。
+LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1, quiet := false) -> (h : mem.Handle, ok : bool) {
 	if size <= 0 {
 		return {}, false
 	}
 	// 解析:先按系统字体名找,再按完整路径
 	path, path_alloc := resolveFontPath(path_or_name)
 
-	// 同 path+size 复用已加载的字体(跨窗口共享)
+	// 同 path+size 复用已加载的字体(跨窗口共享;命中 = 新增一个引用)
 	for i in 1 ..< MAX_FONT_SLOTS {
-		if mem.Alive(&fonts, i) && fonts.data[i].path == path && fonts.data[i].size == size {
+		if f := mem.RcGetIndex(&fonts, i); f != nil && f.path == path && f.size == size {
 			if path_alloc {
 				delete(path) // 堆分配副本,未入字体则释放
 			}
-			return mem.Handle { id = u32(i), generation = fonts.generations[i] }, true
+			h := mem.RcGetHandle(&fonts, i)
+			mem.RcRetain(&fonts, h)
+			return h, true
 		}
 	}
 	font := Font { antialias = max(1, min(3, antialias)) }
 	font.slots = make([dynamic]GlyphSlot, 64) // 哈希桶,装 0.75 后翻倍
 	face, fok := faceLoad(path, size)
 	if !fok {
-		fmt.eprintln("LoadFont: faceLoad failed:", path, size)
+		if !quiet {
+			fmt.eprintln("LoadFont: faceLoad failed:", path, size)
+		}
 		delete(font.slots)
 		if path_alloc {
 			delete(path)
@@ -485,6 +516,7 @@ LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1) -> (h : 
 	cell_h, base := cellAndBaseline(f)
 	font.cell_height = cell_h
 	font.ascent = base
+	font.underline_pos, font.underline_thick, font.strike_pos, font.strike_thick = decoMetrics(f, cell_h)
 	advance : c.int
 	stbtt.GetCodepointHMetrics(&f.info, 'M', &advance, nil)
 	font.cell_width = math.ceil(f32(advance) * f.scale)
@@ -500,50 +532,106 @@ LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1) -> (h : 
 	}
 	font.size = size
 
-	h = mem.Alloc(&fonts, font)
+	h = mem.RcAlloc(&fonts, font)
 	if h.id == 0 {
-		fmt.eprintln("LoadFont: font table full:", path, size)
+		if !quiet {
+			fmt.eprintln("LoadFont: font table full (all refs held):", path, size)
+		}
 		fontFree(&font)
 		return {}, false
 	}
 	return h, true
 }
 
-DestroyFont :: proc(h : mem.Handle) {
-	font := GetFont(h)
+// 增一个引用(同 path+size 新持有者,如窗口继承字体)
+RetainFont :: proc(h : mem.Handle) -> bool {
+	return mem.RcRetain(&fonts, h)
+}
+
+// 变体字体加载(粗/斜/粗斜):基于 base(族名或路径)找同族衍生文件。
+// 两种形态,任一命中即返回(引用 +1):
+//   ① 族名习惯:"<base> <suffix>"(独立 Bold 族的字体,如部分发行版);
+//   ② 文件命名:base 解析到真实文件 → 同目录 `<stem>[-风格尾缀去]` + `-<file_suffix>` + 扩展
+//      (Nerd Fonts / Google Fonts 命名,如 ...Mono-Regular.ttf → ...Mono-Bold.ttf)。
+// 都没有 = 0(调用方用合成兜底);失败静默(变体缺失是常态)。
+LoadFontVariant :: proc(base : string, size : f32, family_suffix, file_suffix : string) -> mem.Handle {
+	// ① 族名习惯
+	{
+		buf : [512]byte
+		n := copy(buf[:], base)
+		if n + 1 + len(family_suffix) <= len(buf) {
+			copy(buf[n:], " ")
+			copy(buf[n + 1:], family_suffix)
+			if h, ok := LoadFont(string(buf[:n + 1 + len(family_suffix)]), size, 1, true); ok {
+				return h
+			}
+		}
+	}
+	// ② 文件命名推导
+	path, path_alloc := resolveFontPath(base)
+	defer if path_alloc {
+		delete(path)
+	}
+	if len(path) == 0 {
+		return {}
+	}
+	dir := 0
+	for i := len(path) - 1; i >= 0; i -= 1 {
+		if path[i] == '\\' {
+			dir = i + 1
+			break
+		}
+	}
+	dot := len(path)
+	for i := len(path) - 1; i > dir; i -= 1 {
+		if path[i] == '.' {
+			dot = i
+			break
+		}
+	}
+	if dir == 0 || dot <= dir {
+		return {}
+	}
+	stem := path[dir:dot]
+	style_tails := []string{"-Regular", "-Book", "-Normal"}
+	for st in style_tails {
+		if strings.has_suffix(stem, st) {
+			stem = stem[:len(stem) - len(st)]
+			break
+		}
+	}
+	ext := path[dot:]
+	vbuf : [512]byte
+	vn := copy(vbuf[:], path[:dir])
+	vn += copy(vbuf[vn:], stem)
+	vn += copy(vbuf[vn:], "-")
+	vn += copy(vbuf[vn:], file_suffix)
+	vn += copy(vbuf[vn:], ext)
+	if vn >= len(vbuf) {
+		return {}
+	}
+	if h, ok := LoadFont(string(vbuf[:vn]), size, 1, true); ok {
+		return h
+	}
+	return {}
+}
+
+// 释放一个引用:最后一个引用归零 = 深析构堆资源;槽保留,Alloc 复用。
+// 所有持有者(窗口/UI 单例)释放必须经此(不能直接 mem.Free)。
+ReleaseFont :: proc(h : mem.Handle) {
+	font := mem.RcGet(&fonts, h) // 指针先取:RcFree 后句柄失效,槽数据仍留
 	if font == nil {
 		return
 	}
-	fontFree(font)
-	mem.Free(&fonts, h)
-}
-
-// 字体表是否已满(再 Alloc 会失败)
-FontTableFull :: proc() -> bool {
-	return fonts.count >= MAX_FONT_SLOTS - 1
-}
-
-// 表满回收:按引用集(used)清掉第一个未被使用的字体槽;
-// 全部在用返回 false。used 由调用方(引用者)扫描提供,font 包只认列表。
-EvictUnused :: proc(used : []mem.Handle) -> bool {
-	for i in 1 ..< MAX_FONT_SLOTS {
-		if !mem.Alive(&fonts, i) {
-			continue
-		}
-		h := mem.Handle { id = u32(i), generation = fonts.generations[i] }
-		in_use := false
-		for &u in used {
-			if u == h {
-				in_use = true
-				break
-			}
-		}
-		if !in_use {
-			DestroyFont(h)
-			return true
-		}
+	mem.RcFree(&fonts, h)
+	if mem.RcRefs(&fonts, h) == 0 {
+		fontFree(font) // 最后一个引用:堆资源立即清;槽值待 Alloc 复用覆盖
 	}
-	return false
+}
+
+// 字体表是否已满(refs > 0 的槽数 = N-1;再 Alloc 会失败)
+FontTableFull :: proc() -> bool {
+	return mem.RcCount(&fonts) >= MAX_FONT_SLOTS - 1
 }
 
 // 查字形:缓存命中直接返回;未命中则光栅化入图集。false = 所有 face 都无此字形
@@ -574,6 +662,10 @@ GetMetrics :: proc(h : mem.Handle) -> Metrics {
 		cell_width = font.cell_width,
 		cell_height = font.cell_height,
 		ascent = font.ascent,
+		underline_pos = font.underline_pos,
+		underline_thick = font.underline_thick,
+		strike_pos = font.strike_pos,
+		strike_thick = font.strike_thick,
 	}
 }
 
@@ -648,6 +740,7 @@ GetAtlasTexture :: proc(h : mem.Handle) -> u32 {
 	if font == nil {
 		return 0
 	}
+	atlasEnsureTexture(&font.atlas) // GL 纹理惰性创建(渲染路径,GL 上下文已就绪)
 	return font.atlas.texture
 }
 
@@ -702,7 +795,9 @@ fontFree :: proc(font : ^Font) {
 	delete(font.slots)
 	delete(font.atlas.pixels)
 	delete(font.path)
-	gl.DeleteTextures(1, &font.atlas.texture)
+	if font.atlas.texture != 0 { // 未建纹理(无 GL 加载路径)不删
+		gl.DeleteTextures(1, &font.atlas.texture)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -928,10 +1023,19 @@ glyphRasterizeById :: proc(font_h : mem.Handle, gid : u16) -> bool {
 // ---------------------------------------------------------------------------
 // 图集
 // ---------------------------------------------------------------------------
+// 分层:atlasInit 只分配像素缓冲(纯数据,无 GL 依赖);GL 纹理创建/上传
+// 在渲染路径经 atlasEnsureTexture 惰性做(GetAtlasTexture 首次调用)。
 
 atlasInit :: proc(a : ^Atlas) {
 	a.width, a.height = ATLAS_START, ATLAS_START
 	a.pixels = make([]u8, a.width * a.height)
+}
+
+// 纹理未建时创建并上传当前像素(GL 上下文必须已就绪;渲染路径调用)
+atlasEnsureTexture :: proc(a : ^Atlas) {
+	if a.texture != 0 {
+		return
+	}
 	gl.GenTextures(1, &a.texture)
 	gl.BindTexture(gl.TEXTURE_2D, a.texture)
 	gl.TexParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
