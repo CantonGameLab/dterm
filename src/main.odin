@@ -101,7 +101,9 @@ initWindows :: proc() -> bool {
 	if page.id == 0 {
 		return false
 	}
-	canvas.SetTheme(canvas.DRACULA_THEME)
+
+	canvas.SetTheme(canvas.SOLARIZED_DARK_THEME)
+
 	render.SetBackgroundShaderEnabled(true)
 	render.ResetBackgroundShader()
 	render.SetVSync(true)

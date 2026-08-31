@@ -113,6 +113,116 @@ DRACULA_THEME := Theme {
 	tab_hover_bg = 0x383A4E,
 }
 
+// Nord 主题(Arctic Night):bg #2E3440 极夜 / fg #D8DEE9 雪;accent = frost 青 #88C0D0
+NORD_THEME := Theme {
+	fg = 0xD8DEE9,
+	bg = 0x2E3440,
+	cursor = 0xD8DEE9,
+	ansi = {
+		0x3B4252, 0xBF616A, 0xA3BE8C, 0xEBCB8B,
+		0x81A1C1, 0xB48EAD, 0x88C0D0, 0xE5E9F0,
+		0x4C566A, 0xBF616A, 0xA3BE8C, 0xEBCB8B,
+		0x81A1C1, 0xB48EAD, 0x88C0D0, 0xECEFF4,
+	},
+	frame = 0x4C566A,
+	focus_border = 0x88C0D0,
+	fps_bg = 0x272C33,
+	fps_fg = 0x616E88,
+	tab_bar_bg = 0x272C33,
+	tab_fg = 0x616E88,
+	tab_active_bg = 0x2E3440,
+	tab_active_fg = 0xD8DEE9,
+	tab_hover_bg = 0x3B4252,
+}
+
+// Solarized Dark(Ethan Schoonover):bg #002B36 / fg #839496;accent = 蓝 #268BD2
+SOLARIZED_DARK_THEME := Theme {
+	fg = 0x839496,
+	bg = 0x002B36,
+	cursor = 0x93A1A1,
+	ansi = {
+		0x073642, 0xDC322F, 0x859900, 0xB58900,
+		0x268BD2, 0xD33682, 0x2AA198, 0xEEE8D5,
+		0x002B36, 0xCB4B16, 0x859900, 0xB58900,
+		0x268BD2, 0xD33682, 0x2AA198, 0xFDF6E3,
+	},
+	frame = 0x586E75,
+	focus_border = 0x268BD2,
+	fps_bg = 0x00212B,
+	fps_fg = 0x586E75,
+	tab_bar_bg = 0x00212B,
+	tab_fg = 0x586E75,
+	tab_active_bg = 0x002B36,
+	tab_active_fg = 0x839496,
+	tab_hover_bg = 0x073642,
+}
+
+// Gruvbox Dark(morhetz):bg #282828 / fg #EBDBB2;accent = 蓝 #83A598
+GRUVBOX_DARK_THEME := Theme {
+	fg = 0xEBDBB2,
+	bg = 0x282828,
+	cursor = 0xEBDBB2,
+	ansi = {
+		0x282828, 0xCC241D, 0x98971A, 0xD79921,
+		0x458588, 0xB16286, 0x689D6A, 0xA89984,
+		0x928374, 0xFB4934, 0xB8BB26, 0xFABD2F,
+		0x83A598, 0xD3869B, 0x8EC07C, 0xEBDBB2,
+	},
+	frame = 0x504945,
+	focus_border = 0x83A598,
+	fps_bg = 0x1D2021,
+	fps_fg = 0x928374,
+	tab_bar_bg = 0x1D2021,
+	tab_fg = 0x928374,
+	tab_active_bg = 0x282828,
+	tab_active_fg = 0xEBDBB2,
+	tab_hover_bg = 0x3C3836,
+}
+
+// Monokai:bg #272822 / fg #F8F8F2;accent = 青 #66D9EF
+MONOKAI_THEME := Theme {
+	fg = 0xF8F8F2,
+	bg = 0x272822,
+	cursor = 0xF8F8F2,
+	ansi = {
+		0x272822, 0xF92672, 0xA6E22E, 0xE6DB74,
+		0x66D9EF, 0xAE81FF, 0xA1EFE4, 0xF8F8F2,
+		0x75715E, 0xF92672, 0xA6E22E, 0xE6DB74,
+		0x66D9EF, 0xAE81FF, 0xA1EFE4, 0xF8F8F2,
+	},
+	frame = 0x49483E,
+	focus_border = 0x66D9EF,
+	fps_bg = 0x1E1F1C,
+	fps_fg = 0x75715E,
+	tab_bar_bg = 0x1E1F1C,
+	tab_fg = 0x75715E,
+	tab_active_bg = 0x272822,
+	tab_active_fg = 0xF8F8F2,
+	tab_hover_bg = 0x3D3E37,
+}
+
+// One Dark(Atom):bg #282C34 / fg #ABB2BF;accent = 蓝 #61AFEF
+ONE_DARK_THEME := Theme {
+	fg = 0xABB2BF,
+	bg = 0x282C34,
+	cursor = 0x528BFF,
+	ansi = {
+		0x282C34, 0xE06C75, 0x98C379, 0xE5C07B,
+		0x61AFEF, 0xC678DD, 0x56B6C2, 0xABB2BF,
+		0x5C6370, 0xE06C75, 0x98C379, 0xE5C07B,
+		0x61AFEF, 0xC678DD, 0x56B6C2, 0xD7DAE0,
+	},
+	frame = 0x3E4451,
+	focus_border = 0x61AFEF,
+	fps_bg = 0x21252B,
+	fps_fg = 0x5C6370,
+	tab_bar_bg = 0x21252B,
+	tab_fg = 0x5C6370,
+	tab_active_bg = 0x282C34,
+	tab_active_fg = 0xABB2BF,
+	tab_hover_bg = 0x3E4451,
+}
+
 // userapi:整表替换(配置入口/main.initWindows);下一帧渲染全部按新表解码(缓冲零重写)
 SetTheme :: proc(t : Theme) {
 	current_theme = t
