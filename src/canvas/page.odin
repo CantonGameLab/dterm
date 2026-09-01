@@ -103,10 +103,11 @@ PageAutoClean :: proc() {
 			return // 最后一页保留
 		}
 		cleaned := false
-		for pi in 1 ..< MAX_PAGE_SLOTS {
-			if p := mem.GetIndex(&pages, pi); p != nil {
+		it : mem.Iter(MAX_PAGE_SLOTS, Page) = mem.All(&pages)
+		for ph in mem.next(&it) {
+			if p := mem.Get(&pages, ph); p != nil {
 				if firstLeafWithWindow(p.tree_root).id == 0 {
-					PageDestroy(mem.GetHandle(&pages, pi))
+					PageDestroy(ph)
 					cleaned = true
 					break // 页销毁后句柄/焦点迁移,重新遍历
 				}
@@ -179,14 +180,13 @@ pageShift :: proc(d : int) -> bool {
 
 // 当前页在存活序中的位置(0-based);-1 = 无
 pageIndexInAlive :: proc(page_h : mem.Handle) -> int {
+	it : mem.Iter(MAX_PAGE_SLOTS, Page) = mem.All(&pages)
 	idx := 0
-	for i in 1 ..< MAX_PAGE_SLOTS {
-		if mem.GetIndex(&pages, i) != nil {
-			if mem.GetHandle(&pages, i) == page_h {
-				return idx
-			}
-			idx += 1
+	for h in mem.next(&it) {
+		if h == page_h {
+			return idx
 		}
+		idx += 1
 	}
 	return -1
 }
@@ -195,11 +195,10 @@ pageIndexInAlive :: proc(page_h : mem.Handle) -> int {
 // 查询
 // ---------------------------------------------------------------------------
 PageCount :: proc() -> int {
+	it : mem.Iter(MAX_PAGE_SLOTS, Page) = mem.All(&pages)
 	count := 0
-	for i in 1 ..< MAX_PAGE_SLOTS {
-		if mem.GetIndex(&pages, i) != nil {
-			count += 1
-		}
+	for _ in mem.next(&it) {
+		count += 1
 	}
 	return count
 }
@@ -216,13 +215,12 @@ CurrentPage :: proc() -> ^Page {
 
 // 存活序第 n 个页(1-based)
 PageByIndex :: proc(n : int) -> mem.Handle {
+	it : mem.Iter(MAX_PAGE_SLOTS, Page) = mem.All(&pages)
 	idx := 0
-	for i in 1 ..< MAX_PAGE_SLOTS {
-		if mem.GetIndex(&pages, i) != nil {
-			idx += 1
-			if idx == n {
-				return mem.GetHandle(&pages, i)
-			}
+	for h in mem.next(&it) {
+		idx += 1
+		if idx == n {
+			return h
 		}
 	}
 	return {}
@@ -386,9 +384,9 @@ TabHitKind :: enum u8 {
 // ---------------------------------------------------------------------------
 // 节点被销毁时清理所有页中指向它的焦点(后台页切回时焦点不悬挂)
 PageClearFocus :: proc(node_h : mem.Handle) {
-	for pi in 1 ..< MAX_PAGE_SLOTS {
-		p := mem.GetIndex(&pages, pi)
-		if p != nil && p.focused == node_h {
+	it : mem.Iter(MAX_PAGE_SLOTS, Page) = mem.All(&pages)
+	for ph in mem.next(&it) {
+		if p := mem.Get(&pages, ph); p != nil && p.focused == node_h {
 			p.focused = firstLeafWithWindow(p.tree_root) // 0 = 无窗
 		}
 	}

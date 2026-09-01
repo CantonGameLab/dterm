@@ -396,8 +396,9 @@ ClearWindowConsole :: proc(id : mem.Handle = {}) -> bool {
 // 断掉所有指向 console_h 的引用(窗口 console_id)。
 // 窗口层销毁会话前的第一步:避免悬挂句柄让"空闲窗口"被误判占用。
 clearConsoleRefs :: proc(h : mem.Handle) {
-	for i in 0 ..< MAX_WINDOW_SLOTS {
-		if w := mem.GetIndex(&windows, i); w != nil {
+	it : mem.Iter(MAX_WINDOW_SLOTS, Window) = mem.All(&windows)
+	for wh in mem.next(&it) {
+		if w := mem.Get(&windows, wh); w != nil {
 			if w.console_id == h {
 				w.console_id = {}
 			}
@@ -517,11 +518,8 @@ PollSessions :: proc() -> bool {
 	ended_count := 0
 	alive := false
 
-	for pi in 1 ..< MAX_PAGE_SLOTS {
-		ph := mem.GetHandle(&pages, pi)
-		if ph.id == 0 {
-			continue
-		}
+	pit : mem.Iter(MAX_PAGE_SLOTS, Page) = mem.All(&pages)
+	for ph in mem.next(&pit) {
 		root := PageTreeRoot(ph)
 		if root.id == 0 {
 			continue

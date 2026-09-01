@@ -117,3 +117,28 @@ RcGetHandle :: proc(ga : ^RefCounted($N, $T), i : int) -> Handle {
 	}
 	return Handle { id = u32(i), generation = ga.generations[i] }
 }
+
+// ---- 枚举迭代器(core 协议:状态对象 + 逐次 nextRc(&it))----
+// 用法:
+//   it := mem.RcAll(&fonts)
+//   for h in mem.nextRc(&it) { ... }   // 输出标准句柄(refs > 0 + 当前世代)
+
+RcIter :: struct($N : int, $T : typeid) {
+	ga : ^RefCounted(N, T),
+	i : int,
+}
+
+RcAll :: proc(ga : ^RefCounted($N, $T)) -> RcIter(N, T) {
+	return { ga = ga, i = 1 } // 槽 0 保留
+}
+
+nextRc :: proc(it : ^RcIter($N, $T)) -> (Handle, bool) {
+	for it.i < N {
+		cur := it.i
+		it.i += 1
+		if RcAlive(it.ga, cur) {
+			return Handle { id = u32(cur), generation = it.ga.generations[cur] }, true
+		}
+	}
+	return {}, false
+}

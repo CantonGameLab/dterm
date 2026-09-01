@@ -111,3 +111,29 @@ GetHandle :: proc(ga : ^GenArray($N, $T), i : int) -> Handle {
 	}
 	return Handle { id = u32(i), generation = ga.generations[i] }
 }
+
+// ---- 枚举迭代器(core 协议:状态对象 + 逐次 next(&it))----
+// 用法:
+//   it := mem.All(&pages)
+//   for h in mem.next(&it) { ... }   // 输出标准句柄(Alive + 当前世代)
+// 槽位是内部实现,调用方不接触 index;冷/中频路径。
+
+Iter :: struct($N : int, $T : typeid) {
+	ga : ^GenArray(N, T),
+	i : int,
+}
+
+All :: proc(ga : ^GenArray($N, $T)) -> Iter(N, T) {
+	return { ga = ga, i = 1 } // 槽 0 保留
+}
+
+next :: proc(it : ^Iter($N, $T)) -> (Handle, bool) {
+	for it.i < N {
+		cur := it.i
+		it.i += 1
+		if Alive(it.ga, cur) {
+			return Handle { id = u32(cur), generation = it.ga.generations[cur] }, true
+		}
+	}
+	return {}, false
+}

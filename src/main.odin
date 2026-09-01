@@ -102,7 +102,7 @@ initWindows :: proc() -> bool {
 		return false
 	}
 
-	canvas.SetTheme(canvas.SOLARIZED_DARK_THEME)
+	canvas.SetTheme(canvas.GRUVBOX_DARK_THEME)
 
 	render.SetBackgroundShaderEnabled(true)
 	render.ResetBackgroundShader()

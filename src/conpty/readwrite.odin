@@ -132,9 +132,8 @@ StopReadThread :: proc(h : mem.Handle) {
 }
 
 StopAllReadThreads :: proc() {
-	for i in 1 ..< MAX_CONPTY_SLOTS {
-		if mem.Alive(&conpty_contexts, i) {
-			StopReadThread(mem.GetHandle(&conpty_contexts, i))
-		}
+	it : mem.Iter(MAX_CONPTY_SLOTS, ConptyContext) = mem.All(&conpty_contexts)
+	for h in mem.next(&it) {
+		StopReadThread(h)
 	}
 }

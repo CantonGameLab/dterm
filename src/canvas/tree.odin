@@ -504,8 +504,9 @@ treeNodeSetSon :: proc(h, son_h : mem.Handle, is_left : bool) -> bool {
 WindowTreeSetRootSize :: proc(width, height : u32) {
 	Window_Width = width
 	Window_Height = height - u32(TAB_BAR_HEIGHT)
-	for i in 1 ..< MAX_PAGE_SLOTS {
-		if page := mem.GetIndex(&pages, i); page != nil {
+	it : mem.Iter(MAX_PAGE_SLOTS, Page) = mem.All(&pages)
+	for ph in mem.next(&it) {
+		if page := mem.Get(&pages, ph); page != nil {
 			root := GetWindowTreeNode(page.tree_root)
 			if root == nil {
 				continue
@@ -756,8 +757,9 @@ layoutWalk :: proc(node_h : mem.Handle) {
 // 遍历②(console):目标尺寸(rows/cols)与 ConPTY 已应用(pty_*)比较,
 // 变化才 Resize 并更新已应用记录。工具 console(conpty = 0)跳过。
 updateConptyResize :: proc() {
-	for i in 0 ..< MAX_CONSOLE_SLOTS {
-		console := mem.GetIndex(&consoles, i)
+	it : mem.Iter(MAX_CONSOLE_SLOTS, Console) = mem.All(&consoles)
+	for ch in mem.next(&it) {
+		console := mem.Get(&consoles, ch)
 		if console == nil || ct.GetConptyContext(console.conpty_handle) == nil {
 			continue
 		}
@@ -771,12 +773,13 @@ updateConptyResize :: proc() {
 
 // 遍历③(console):消费会话输出(buffer + vt 状态);工具 console 无 conpty 跳过。
 updateConsoleOutput :: proc() {
-	for i in 0 ..< MAX_CONSOLE_SLOTS {
-		console := mem.GetIndex(&consoles, i)
+	it : mem.Iter(MAX_CONSOLE_SLOTS, Console) = mem.All(&consoles)
+	for ch in mem.next(&it) {
+		console := mem.Get(&consoles, ch)
 		if console == nil || ct.GetConptyContext(console.conpty_handle) == nil {
 			continue
 		}
-		UpdateConsole(mem.GetHandle(&consoles, i))
+		UpdateConsole(ch)
 	}
 }
 

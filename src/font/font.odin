@@ -466,12 +466,12 @@ LoadFont :: proc(path_or_name : string, size : f32, antialias : u8 = 1, quiet :=
 	path, path_alloc := resolveFontPath(path_or_name)
 
 	// 同 path+size 复用已加载的字体(跨窗口共享;命中 = 新增一个引用)
-	for i in 1 ..< MAX_FONT_SLOTS {
-		if f := mem.RcGetIndex(&fonts, i); f != nil && f.path == path && f.size == size {
+	fit : mem.RcIter(MAX_FONT_SLOTS, Font) = mem.RcAll(&fonts)
+	for h in mem.nextRc(&fit) {
+		if f := mem.RcGet(&fonts, h); f != nil && f.path == path && f.size == size {
 			if path_alloc {
 				delete(path) // 堆分配副本,未入字体则释放
 			}
-			h := mem.RcGetHandle(&fonts, i)
 			mem.RcRetain(&fonts, h)
 			return h, true
 		}
