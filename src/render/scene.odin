@@ -279,9 +279,18 @@ drawFrame :: proc(node_h : mem.Handle) {
 	case .LeftRight:
 		// 竖条:紧贴左子右边界
 		DrawRect(left.position_x + left.width, node.position_y, fw, node.height, theme.frame)
+		// 拖拽高亮:focus_border 色加宽 4px(临时档),中心对齐原条
+		if cv.SplitDragTarget() == node_h {
+			hw := f32(4)
+			DrawRect(left.position_x + left.width + fw*0.5 - hw*0.5, node.position_y, hw, node.height, theme.focus_border)
+		}
 	case .UpDown:
 		// 横条:紧贴左(上)子下边界
 		DrawRect(node.position_x, left.position_y + left.height, node.width, fw, theme.frame)
+		if cv.SplitDragTarget() == node_h {
+			hw := f32(4)
+			DrawRect(node.position_x, left.position_y + left.height + fw*0.5 - hw*0.5, node.width, hw, theme.focus_border)
+		}
 	}
 }
 
@@ -323,6 +332,8 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 			break
 		}
 		line := &tb.lines[line_idx]
+		// 选区渲染开关:当前 console 持有的 buffer = 被选 buffer(只读比较)
+		sel_console := console.active_term_buffer_id.id != 0 && console.active_term_buffer_id == cv.SelectionBuffer()
 		col_limit := min(int(console.cols), len(line.cells))
 		if col_limit == 0 {
 			continue
@@ -342,9 +353,22 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 		// 连体合并(未来 type4)会缩短数组;绘制按缩短后的长度截断
 		draw_limit := min(col_limit, len(draw_shaped))
 		if bg {
-			// 第 1 趟:只画背景(打底/cell 底色 → 背景批)
-			for c in 0 ..< draw_limit {
+			// 第 1 趟:只画背景(打底/cell 底色 → 背景批);选区覆盖在 cell 底色之上。
+			// 宽字符续列不单独画:首格按宽 2 一次画(底色与选区列对齐)。
+			for c in 0 ..< col_limit {
 				cell := line.cells[c]
+				w := 1
+				if cell.cp != 0 && cell.wide {
+					w = 2
+				} else if cell.cp == 0 && cell.wide {
+					continue
+				}
+				if sel_console && cv.CellSelected(line_idx, c, w, int(console.cols)) {
+					cx := console.origin_x + f32(c) * m.cell_width
+					cy := console.origin_y + f32(r) * m.cell_height
+					DrawRectBg(cx, cy, m.cell_width * f32(w), m.cell_height, theme.selection_bg)
+					continue
+				}
 				bg_c := cv.ResolveColor(cell.bg, theme.bg)
 				if cell.reverse {
 					bg_c = cv.ResolveColor(cell.fg, theme.fg)
@@ -352,7 +376,7 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 				if bg_c != theme.bg {
 					cx := console.origin_x + f32(c) * m.cell_width
 					cy := console.origin_y + f32(r) * m.cell_height
-					DrawRectBg(cx, cy, m.cell_width, m.cell_height, bg_c)
+					DrawRectBg(cx, cy, m.cell_width * f32(w), m.cell_height, bg_c)
 				}
 			}
 			continue
@@ -385,6 +409,9 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 			fg := cv.ResolveColor(cell.fg, theme.fg)
 			if cell.reverse {
 				fg = cv.ResolveColor(cell.bg, theme.bg)
+			}
+			if sel_console && cv.CellSelected(line_idx, c, 1, int(console.cols)) {
+				fg = theme.selection_fg // 选中字形换选区前景(背景已在 1 趟覆盖)
 			}
 			gid := draw_shaped[c]
 			// fh ≠ 主字体时连体 gid 属主字体表:强制普通 cp 路径

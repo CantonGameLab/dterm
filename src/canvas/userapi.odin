@@ -258,7 +258,7 @@ SetSplitFactor :: proc(factor : f32, id : mem.Handle = {}) -> bool {
 }
 
 // 与 id(或焦点)window 的 dir 方向邻居交换窗口内容:只交换两节点的 window_id,
-// 树结构不变
+// 树结构不变。focus 跟随 window:交换后焦点迁往持有"原焦点窗口"的节点。
 ExchangeWindow :: proc(dir : FocusDirection, id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -274,6 +274,11 @@ ExchangeWindow :: proc(dir : FocusDirection, id : mem.Handle = {}) -> bool {
 		return false
 	}
 	a.window_id, b.window_id = b.window_id, a.window_id
+	if CurrentPage().focused == node_h {
+		CurrentPage().focused = target // 原焦点窗口现在挂在 target
+	} else if CurrentPage().focused == target {
+		CurrentPage().focused = node_h
+	}
 	return true
 }
 

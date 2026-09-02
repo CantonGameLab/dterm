@@ -79,6 +79,72 @@ SetClipboardText :: proc(data : []byte) -> bool {
 	return s3.SetClipboardText(cstring(raw_data(buf)))
 }
 
+// 读剪贴板(SDL 内存拷回后释放;调用方负责 delete 返回缓冲;无内容/失败 = 空)
+GetClipboardText :: proc() -> []byte {
+	p := s3.GetClipboardText()
+	if p == nil {
+		return nil
+	}
+	defer s3.free(p)
+	n := 0
+	for p[n] != 0 {
+		n += 1
+	}
+	buf := make([]byte, n)
+	copy(buf, p[:n])
+	return buf
+}
+
+// 系统单调毫秒(击键连击等时序判定;GetTicks 无需初始化,测试安全)
+NowTicks :: proc() -> u64 {
+	return s3.GetTicks()
+}
+
+// ---------------------------------------------------------------------------
+// 光标反馈(设备层):系统光标切换;懒创建一次 + 缓存上次 kind(变化才设置)
+// ---------------------------------------------------------------------------
+CursorKind :: enum u8 {
+	Default,
+	Text,
+	ResizeH,
+	ResizeV,
+}
+
+cursor_known : [CursorKind]^s3.Cursor
+cursor_kind : CursorKind = CursorKind(0xFF) // 未初始化(enum 哨兵值)
+
+// 设置系统光标(重复请求短路;系统光标懒创建,生命周期复用)。
+// SDL 未初始化(无窗口场景)时尽力而为:不设置也不报错。
+SetCursor :: proc(kind : CursorKind) {
+	if kind == cursor_kind {
+		return
+	}
+	c := cursor_known[kind]
+	if c == nil {
+		switch kind {
+		case .Default:
+			c = s3.GetDefaultCursor()
+		case .Text:
+			c = s3.CreateSystemCursor(.TEXT)
+		case .ResizeH:
+			c = s3.CreateSystemCursor(.EW_RESIZE)
+		case .ResizeV:
+			c = s3.CreateSystemCursor(.NS_RESIZE)
+		}
+		cursor_known[kind] = c
+	}
+	if c == nil {
+		return
+	}
+	cursor_kind = kind
+	_ = s3.SetCursor(c)
+}
+
+// 当前光标(测试/调试断言)
+GetCursorKind :: proc() -> CursorKind {
+	return cursor_kind
+}
+
 // 每帧唯一入口:清上一帧边沿(事件泵在 event 模块,先于本模块调用)
 BeginFrame :: proc() {
 	for i in 0 ..< SCANCODE_COUNT {

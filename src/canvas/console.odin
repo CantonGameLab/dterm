@@ -32,12 +32,13 @@ Console :: struct {
 
 consoles : mem.GenArray(MAX_CONSOLE_SLOTS, Console)
 
-// 自动建主屏 TermBuffer;绑定 conpty_handle
+// 自动建主屏 TermBuffer;绑定 conpty_handle。
+// conpty = 0 = 工具 console(无会话:输入路径 WriteConptyInput 为空操作,轮询跳过)。
 CreateConsole :: proc(rows, cols : u16, conpty_handle : mem.Handle) -> (h : mem.Handle, ok : bool) {
 	if rows == 0 || cols == 0 {
 		return {}, false
 	}
-	if ct.GetConptyContext(conpty_handle) == nil {
+	if conpty_handle.id != 0 && ct.GetConptyContext(conpty_handle) == nil {
 		return {}, false
 	}
 	tb_h, tb_ok := CreateTermBuffer()

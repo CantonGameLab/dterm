@@ -114,6 +114,15 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 		return PagePrev()
 	case .PageClose:
 		return PageDestroy(PageCurrent())
+	case .CopySelection:
+		return CopySelection()
+	case .PasteClipboard:
+		return PasteClipboard()
+	case .SelectionClear:
+		SelectionClear()
+		return true
+	case .SelectAll:
+		return SelectionSelectAll()
 	case .Count:
 		if out != nil {
 			out(fmt.tprintf("windows: %d", WindowCount()))
@@ -176,6 +185,10 @@ CommandStringKind :: enum u8 {
 	PageNext,     // 相邻页
 	PagePrev,
 	PageClose,    // 关当前页
+	CopySelection, // 复制文本选区到剪贴板(无选区 = 空操作;选区保留)
+	PasteClipboard, // 剪贴板文本粘贴到焦点窗口
+	SelectionClear, // 清除文本选区
+	SelectAll, // 全选焦点窗口缓冲
 }
 
 ParsedCommand :: struct {
@@ -408,6 +421,14 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 		pc.kind = .PagePrev
 	case "page-close":
 		pc.kind = .PageClose
+	case "copy":
+		pc.kind = .CopySelection
+	case "paste":
+		pc.kind = .PasteClipboard
+	case "clearselection":
+		pc.kind = .SelectionClear
+	case "selectall":
+		pc.kind = .SelectAll
 	case:
 		return {}, false
 	}

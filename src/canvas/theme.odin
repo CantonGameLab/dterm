@@ -64,6 +64,7 @@ Theme :: struct {
 	tab_active_bg : u32, // 激活页签底(默认 = 主题 bg:WT 式"背景延伸进激活页签")
 	tab_active_fg : u32, // 激活页签文字(默认 = 主题 fg)
 	tab_hover_bg : u32, // 页签悬停底
+	selection_bg, selection_fg : u32, // 文本选区底色/字形色(选区高亮)
 }
 
 // 默认主题(现行配色)
@@ -86,6 +87,8 @@ DEFAULT_THEME := Theme {
 	tab_active_bg = 0x1E1E1E, // = bg(WT 式背景延伸)
 	tab_active_fg = 0xEAEAEA,
 	tab_hover_bg = 0x26262E,
+	selection_bg = 0x264F78,
+	selection_fg = 0xFFFFFF,
 }
 
 current_theme : Theme = DEFAULT_THEME
@@ -111,6 +114,8 @@ DRACULA_THEME := Theme {
 	tab_active_bg = 0x282A36, // 激活页签 = 主题 bg(背景延伸)
 	tab_active_fg = 0xF8F8F2,
 	tab_hover_bg = 0x383A4E,
+	selection_bg = 0x44475A,
+	selection_fg = 0xF8F8F2,
 }
 
 // Nord 主题(Arctic Night):bg #2E3440 极夜 / fg #D8DEE9 雪;accent = frost 青 #88C0D0
@@ -133,6 +138,8 @@ NORD_THEME := Theme {
 	tab_active_bg = 0x2E3440,
 	tab_active_fg = 0xD8DEE9,
 	tab_hover_bg = 0x3B4252,
+	selection_bg = 0x4C566A,
+	selection_fg = 0xD8DEE9,
 }
 
 // Solarized Dark(Ethan Schoonover):bg #002B36 / fg #839496;accent = 蓝 #268BD2
@@ -155,6 +162,8 @@ SOLARIZED_DARK_THEME := Theme {
 	tab_active_bg = 0x002B36,
 	tab_active_fg = 0x839496,
 	tab_hover_bg = 0x073642,
+	selection_bg = 0x073642,
+	selection_fg = 0xEEE8D5,
 }
 
 // Gruvbox Dark(morhetz):bg #282828 / fg #EBDBB2;accent = 蓝 #83A598
@@ -177,6 +186,8 @@ GRUVBOX_DARK_THEME := Theme {
 	tab_active_bg = 0x282828,
 	tab_active_fg = 0xEBDBB2,
 	tab_hover_bg = 0x3C3836,
+	selection_bg = 0x504945,
+	selection_fg = 0xEBDBB2,
 }
 
 // Monokai:bg #272822 / fg #F8F8F2;accent = 青 #66D9EF
@@ -199,6 +210,8 @@ MONOKAI_THEME := Theme {
 	tab_active_bg = 0x272822,
 	tab_active_fg = 0xF8F8F2,
 	tab_hover_bg = 0x3D3E37,
+	selection_bg = 0x49483E,
+	selection_fg = 0xF8F8F2,
 }
 
 // One Dark(Atom):bg #282C34 / fg #ABB2BF;accent = 蓝 #61AFEF
@@ -221,6 +234,8 @@ ONE_DARK_THEME := Theme {
 	tab_active_bg = 0x282C34,
 	tab_active_fg = 0xABB2BF,
 	tab_hover_bg = 0x3E4451,
+	selection_bg = 0x3E4451,
+	selection_fg = 0xABB2BF,
 }
 
 // userapi:整表替换(配置入口/main.initWindows);下一帧渲染全部按新表解码(缓冲零重写)

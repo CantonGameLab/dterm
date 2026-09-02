@@ -17,6 +17,8 @@ Update :: proc() -> bool {
 		return false
 	}
 
+	SelectionValidate() // 选区自愈(buffer 数据链验证;失效即清,渲染前定稿)
+
 	ProcessMouse()
 	ProcessKeys()
 

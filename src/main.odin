@@ -79,6 +79,11 @@ initWindows :: proc() -> bool {
 	// 命令栏
 	canvas.SetKeyBinding(.F2, {}, canvas.ParsedCommand { kind = .ToggleCommandBar })
 
+	// 文本选区:复制/粘贴/全选(默认键位;改键改这一处)
+	canvas.SetKeyBinding(.C, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .CopySelection })
+	canvas.SetKeyBinding(.V, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .PasteClipboard })
+	canvas.SetKeyBinding(.A, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .SelectAll })
+
 	// 字号
 	canvas.SetKeyBinding(.EQUALS, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .FontSizeUp })
 	canvas.SetKeyBinding(.MINUS, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .FontSizeDown })

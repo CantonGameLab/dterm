@@ -7,6 +7,7 @@ package canvas
 import ct "../conpty"
 import fnt "../font"
 import mem "../memory"
+import "core:math"
 
 MAX_TREE_NODE_SLOTS :: 2000
 
@@ -240,6 +241,62 @@ NodeWindow :: proc(h : mem.Handle) -> ^Window {
 // 命中测试:包含点 (x, y)(窗口物理像素)的 leaf 节点;无命中返回 {}
 nodeAtPoint :: proc(x, y : f32) -> mem.Handle {
 	return nodeAtPointRec(WindowTreeRoot(), x, y)
+}
+
+// 分割条命中:内部节点的条带命中(条中心线公式与 drawFrame 同源,见其注释)。
+// 命中 = 轴向上 |cur - 条中心| ≤ fw/2 + FRAME_HIT_PAD,且点在节点另一轴范围内;
+// 多点命中(正交条交叉)取垂距最小,等距先序先见(确定性)。迭代先序,栈内嵌,零分配。
+FRAME_HIT_PAD :: f32(2)
+
+SplitFrameHit :: proc(x, y : f32) -> mem.Handle {
+	root := WindowTreeRoot()
+	if root.id == 0 {
+		return {}
+	}
+	best : mem.Handle
+	best_d := math.INF_F32
+	stack : [MAX_TREE_NODE_SLOTS]mem.Handle
+	sp := 0
+	stack[sp] = root
+	sp += 1
+	for sp > 0 {
+		sp -= 1
+		cur := stack[sp]
+		node := GetWindowTreeNode(cur)
+		if node == nil || node.is_leaf {
+			continue
+		}
+		if left := GetWindowTreeNode(node.left_son_id); left != nil {
+			fw := f32(node.frame_width)
+			switch node.split_type {
+			case .LeftRight:
+				if y >= node.position_y && y < node.position_y + node.height {
+					center := left.position_x + left.width + fw * 0.5
+					d := math.abs(x - center)
+					if d <= fw * 0.5 + FRAME_HIT_PAD && d < best_d {
+						best, best_d = cur, d
+					}
+				}
+			case .UpDown:
+				if x >= node.position_x && x < node.position_x + node.width {
+					center := left.position_y + left.height + fw * 0.5
+					d := math.abs(y - center)
+					if d <= fw * 0.5 + FRAME_HIT_PAD && d < best_d {
+						best, best_d = cur, d
+					}
+				}
+			}
+		}
+		if node.right_son_id.id != 0 && sp < MAX_TREE_NODE_SLOTS {
+			stack[sp] = node.right_son_id
+			sp += 1
+		}
+		if node.left_son_id.id != 0 && sp < MAX_TREE_NODE_SLOTS {
+			stack[sp] = node.left_son_id
+			sp += 1
+		}
+	}
+	return best
 }
 
 nodeAtPointRec :: proc(h : mem.Handle, x, y : f32) -> mem.Handle {

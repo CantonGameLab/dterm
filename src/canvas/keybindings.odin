@@ -96,12 +96,25 @@ ProcessKeys :: proc() {
 }
 
 // 每帧调用(main):消费 input 包鼠标状态。
-// 命中规则:底部页签条优先(页操作,不落窗口树);否则鼠标点所在 leaf = 动作目标;
-// 应用鼠标模式(?1000/1002/1003)优先接管。
+// 命中规则:活动拖拽独占(结束/取消/更新);底部页签条优先(页操作,不落窗口树);
+// 否则左键命中分割条 → 开始拖拽(UI 优先于应用模式,WT 行为);应用鼠标模式
+// (?1000/1002/1003)再接管;最后鼠标点所在 leaf = 动作目标。
 ProcessMouse :: proc() {
 	m := &inp.Mouse
+	updateCursor() // 光标反馈与路由同位次(只读输入+状态,无副作用)
 	if !m.x_ok {
 		return
+	}
+	if split_drag.active {
+		splitDragUpdate(m) // 独占:释放/右键取消/位移;其余事件忽略
+		return
+	}
+	// 选区拖拽/定稿(与命中无关:update 用宿主机几何换算,release 只清 active)
+	if m.moved && m.left && selection.active {
+		selectionUpdate(m.x, m.y)
+	}
+	if m.release & 1 != 0 && selection.active {
+		selection.active = false
 	}
 	// 页签条命中(按下):切换页 / 新建页
 	if m.press != 0 {
@@ -114,6 +127,12 @@ ProcessMouse :: proc() {
 			case .None:
 			}
 			return
+		}
+		// 分割条命中(左键按下):开始拖拽(条在窗口边缘内 pad 像素,优先于聚焦)
+		if m.press & 1 != 0 {
+			if h := SplitFrameHit(m.x, m.y); h.id != 0 && splitDragBegin(h, m.x, m.y) {
+				return
+			}
 		}
 	}
 	node_h := nodeAtPoint(m.x, m.y)
@@ -133,9 +152,34 @@ ProcessMouse :: proc() {
 		mouseToApp(console, win.font_id)
 		return
 	}
-	// UI 绑定:点击聚焦;滚轮滚动历史(review)
+	// UI 绑定:点击聚焦;左键选择(单击/双击词/三击行/Shift 扩展);中键粘贴;
+	// 滚轮滚动历史(review)
 	if m.press != 0 {
 		CurrentPage().focused = node_h
+	}
+	if m.press & 1 != 0 {
+		// Shift+点击 = 扩展(cur = 点击处,pivot 保留);无选区则普通起选
+		if m.mods & 1 != 0 && SelectionValid() && selection.buffer_h == console.active_term_buffer_id {
+			selectionUpdate(m.x, m.y)
+			selection.active = true
+		} else {
+			// 连击:双击词选 / 三击行选;否则普通(替换旧选区)
+			mtr := fnt.GetMetrics(win.font_id)
+			tb := GetTermBuffer(console.active_term_buffer_id)
+			top, _ := ConsoleViewportTop(win.console_id)
+			line, col := screenToBuffer(console, tb, top, mtr, m.x, m.y)
+			switch clickChain(console.active_term_buffer_id, line, col) {
+			case 2:
+				SelectionSetWord(console.active_term_buffer_id, line, col)
+			case 3:
+				SelectionSetLine(console.active_term_buffer_id, line)
+			case:
+				selectionBegin(node_h, m.x, m.y)
+			}
+		}
+	}
+	if m.press & 2 != 0 {
+		PasteClipboard()
 	}
 	if m.wheel != 0 {
 		CurrentPage().focused = node_h

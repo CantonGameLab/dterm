@@ -113,6 +113,7 @@ TermBufferClear :: proc(h : mem.Handle) {
 		delete(line.cells)
 	}
 	clear(&tb.lines)
+	SelectionClear() // 内容全没了,选区同步失效
 }
 
 // 折行一次:光标下移/滚动,列归 0。调用方保证 pending 语义由自己处理
@@ -212,6 +213,9 @@ vtScrollUp :: proc(console_h : mem.Handle) {
 	delete(tb.lines[top].cells)
 	remove_range(&tb.lines, top, top + 1)
 	insertLine(&tb.lines, bottom)
+	// 选区通报:顶行删 + 底行补空 = 滚动区内整体上移一格
+	selectionLineDelete(top, 1)
+	selectionLineInsert(bottom, 1)
 }
 
 vtScrollDown :: proc(console_h : mem.Handle) {
@@ -230,6 +234,9 @@ vtScrollDown :: proc(console_h : mem.Handle) {
 	delete(tb.lines[bottom].cells)
 	remove_range(&tb.lines, bottom, bottom + 1)
 	insertLine(&tb.lines, top)
+	// 选区通报:底行删 + 顶行补空 = 滚动区内整体下移一格
+	selectionLineDelete(bottom, 1)
+	selectionLineInsert(top, 1)
 }
 
 // core:slice 无 insert 的替代实现
@@ -258,6 +265,7 @@ trimScrollback :: proc(console_h : mem.Handle) {
 		delete(tb.lines[i].cells)
 	}
 	remove_range(&tb.lines, 0, cut)
+	selectionLineDelete(0, cut) // 选区通报:被裁段内容消失,未裁段行号 -cut
 	console.cursor_row -= u16(cut)
 	console.vt.scroll_top, console.vt.scroll_bottom = 0, console.rows - 1
 	// review 锚定行随裁剪平移;被裁掉的视口内容钳到顶(该历史段已丢弃)
@@ -419,6 +427,7 @@ vtDeleteChars :: proc(console_h : mem.Handle, n : int) {
 	for i in 0 ..< nn {
 		append(&line.cells, erase)
 	}
+	selectionColDelete(row, col, nn) // 选区通报:行内删除(列平移/内容消失)
 }
 
 // ICH:光标处插入 n 空白字符,右侧挤出
@@ -446,6 +455,7 @@ vtInsertChars :: proc(console_h : mem.Handle, n : int) {
 	for i in col ..< col + nn {
 		line.cells[i] = erase
 	}
+	selectionColInsert(row, col, nn) // 选区通报:行内插入(列平移)
 }
 
 // IL:光标处插入 n 空行,滚动区底行被挤出
@@ -471,6 +481,7 @@ vtInsertLines :: proc(console_h : mem.Handle, n : int) {
 		}
 		insertLine(&tb.lines, row)
 	}
+	selectionLineInsert(row, n) // 选区通报:row 处插入 n 行(行号平移)
 }
 
 // DL:删除光标处 n 行,滚动区底补空行
@@ -486,6 +497,7 @@ vtDeleteLines :: proc(console_h : mem.Handle, n : int) {
 	base := screenBase(console, tb)
 	row := int(console.cursor_row)
 	bottom := base + int(console.vt.scroll_bottom)
+	actual := 0
 	for i in 0 ..< n {
 		if row >= len(tb.lines) {
 			break
@@ -493,6 +505,10 @@ vtDeleteLines :: proc(console_h : mem.Handle, n : int) {
 		delete(tb.lines[row].cells)
 		remove_range(&tb.lines, row, row + 1)
 		insertLine(&tb.lines, bottom)
+		actual += 1
 	}
+	// 选区通报:删 [row, row+actual) + 底补 actual 空行
+	selectionLineDelete(row, actual)
+	selectionLineInsert(bottom, actual)
 }
 
