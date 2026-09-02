@@ -100,7 +100,7 @@ initWindows :: proc() -> bool {
 	// 在你自己的终端会话里按环境换回 msys2_shell.cmd)
 	canvas.SetDefaultLaunch(
 		"bash.exe",
-		"FiraCode Nerd Font Mono", 26)
+		"Consolas", 26)
 	// 第一页:页根 + 根窗(自动启动默认),成为当前页
 	page := canvas.PageNew()
 	if page.id == 0 {
@@ -111,6 +111,6 @@ initWindows :: proc() -> bool {
 
 	render.SetBackgroundShaderEnabled(true)
 	render.ResetBackgroundShader()
-	render.SetVSync(true)
+	render.SetVSync(false)
 	return true
 }
