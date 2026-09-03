@@ -788,63 +788,57 @@ LeafSplitOwner :: proc(n : int) -> mem.Handle {
 // 各趟写入数据仍保持单一;跨趟信息 = 数据自身(目标 vs 已应用,比较即知)。
 // ---------------------------------------------------------------------------
 
-// 遍历①(node 树):每个挂 console 的 leaf:就地读几何(节点真源),写 Console 布局。
-layoutWalk :: proc(node_h : mem.Handle) {
-	node := GetWindowTreeNode(node_h)
-	if node == nil {
-		return
-	}
-	if !node.is_leaf {
-		layoutWalk(node.left_son_id)
-		layoutWalk(node.right_son_id)
-		return
-	}
-	win := NodeWindow(node_h)
-	if win == nil || win.console_id.id == 0 {
-		return
-	}
-	console := GetConsole(win.console_id)
-	if console == nil {
-		return
-	}
-	m := fnt.GetMetrics(win.font_id) // 字体 = 窗口配置(唯一真相;console 无副本)
-	ConsoleUpdateLayout(win.console_id, node.transform, m.cell_width, m.cell_height)
-}
-
-// 遍历②(console):目标尺寸(rows/cols)与 ConPTY 已应用(pty_*)比较,
-// 变化才 Resize 并更新已应用记录。工具 console(conpty = 0)跳过。
-updateConptyResize :: proc() {
-	it : mem.Iter(MAX_CONSOLE_SLOTS, Console) = mem.All(&consoles)
-	for ch in mem.next(&it) {
-		console := mem.Get(&consoles, ch)
-		if console == nil || ct.GetConptyContext(console.conpty_handle) == nil {
-			continue
-		}
-		if console.rows == console.pty_rows && console.cols == console.pty_cols {
-			continue
-		}
-		ct.Resize(console.conpty_handle, console.cols, console.rows)
-		console.pty_rows, console.pty_cols = console.rows, console.cols
-	}
-}
-
-// 遍历③(console):消费会话输出(buffer + vt 状态);工具 console 无 conpty 跳过。
-updateConsoleOutput :: proc() {
-	it : mem.Iter(MAX_CONSOLE_SLOTS, Console) = mem.All(&consoles)
-	for ch in mem.next(&it) {
-		console := mem.Get(&consoles, ch)
-		if console == nil || ct.GetConptyContext(console.conpty_handle) == nil {
-			continue
-		}
-		UpdateConsole(ch)
-	}
-}
 
 // 每帧对外编排:布局(树) → 尺寸应用 → 输出。
 // 趟序契约:布局先行(输出消费布局后的视口状态)。
 ConsoleUpdateTree :: proc(node_h : mem.Handle) {
+
 	layoutWalk(node_h)
-	updateConptyResize()
-	updateConsoleOutput()
+
+	it : mem.Iter(MAX_CONSOLE_SLOTS, Console) = mem.All(&consoles)
+	for ch in mem.next(&it) {
+		console := mem.Get(&consoles, ch)
+		if console == nil || ct.GetConptyContext(console.conpty_handle) == nil {
+			continue
+		}
+
+		UpdateConsole(ch)
+
+		if console.rows == console.pty_rows && console.cols == console.pty_cols {
+			continue
+		}
+
+		// 遍历②(console):目标尺寸(rows/cols)与 ConPTY 已应用(pty_*)比较,
+		// 变化才 Resize 并更新已应用记录。工具 console(conpty = 0)跳过。
+
+		ct.Resize(console.conpty_handle, console.cols, console.rows)
+		console.pty_rows, console.pty_cols = console.rows, console.cols
+
+	}
+
+
+	// 遍历①(node 树):每个挂 console 的 leaf:就地读几何(节点真源),写 Console 布局。
+	layoutWalk :: proc(node_h : mem.Handle) {
+		node := GetWindowTreeNode(node_h)
+		if node == nil {
+			return
+		}
+		if !node.is_leaf {
+			layoutWalk(node.left_son_id)
+			layoutWalk(node.right_son_id)
+			return
+		}
+		win := NodeWindow(node_h)
+		if win == nil || win.console_id.id == 0 {
+			return
+		}
+		console := GetConsole(win.console_id)
+		if console == nil {
+			return
+		}
+		m := fnt.GetMetrics(win.font_id) // 字体 = 窗口配置(唯一真相;console 无副本)
+		ConsoleUpdateLayout(win.console_id, node.transform, m.cell_width, m.cell_height)
+	}
+
 }
 

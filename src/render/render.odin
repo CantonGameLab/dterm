@@ -298,13 +298,18 @@ writeQuad :: proc(verts : ^[MAX_QUADS * 6]Vertex, q : int, x0, y0, x1, y1, u0, v
 	r := f32(color >> 16 & 0xFF) / 255
 	g := f32(color >> 8 & 0xFF) / 255
 	b := f32(color & 0xFF) / 255
+	// alpha:高字节 0 = 不透明(向后兼容 0xRRGGBB);0xAARRGGBB = 半透明(动画)
+	a := f32(1)
+	if color >> 24 != 0 {
+		a = f32(color >> 24 & 0xFF) / 255
+	}
 	base := q * 6
-	verts[base + 0] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
-	verts[base + 1] = Vertex { fx1, fy0, u1, v0, r, g, b, 1 }
-	verts[base + 2] = Vertex { fx1 + dx, fy1, u1, v1, r, g, b, 1 }
-	verts[base + 3] = Vertex { fx1 + dx, fy1, u1, v1, r, g, b, 1 }
-	verts[base + 4] = Vertex { fx0 + dx, fy1, u0, v1, r, g, b, 1 }
-	verts[base + 5] = Vertex { fx0, fy0, u0, v0, r, g, b, 1 }
+	verts[base + 0] = Vertex { fx0, fy0, u0, v0, r, g, b, a }
+	verts[base + 1] = Vertex { fx1, fy0, u1, v0, r, g, b, a }
+	verts[base + 2] = Vertex { fx1 + dx, fy1, u1, v1, r, g, b, a }
+	verts[base + 3] = Vertex { fx1 + dx, fy1, u1, v1, r, g, b, a }
+	verts[base + 4] = Vertex { fx0 + dx, fy1, u0, v1, r, g, b, a }
+	verts[base + 5] = Vertex { fx0, fy0, u0, v0, r, g, b, a }
 }
 
 flushBatch :: proc() {

@@ -188,13 +188,10 @@ ProcessMouse :: proc() {
 	}
 }
 
-// 键盘文本输入绑定:任一键盘输入先退出 review 回普通模式(终端惯例:
+// 键盘文本输入:任一键盘输入先退出 review 回普通模式(终端惯例:
 // WS 等终端在滚动查看时产生输入即回到实时),再交给焦点窗口应用。
 // CommandBar 模态可见时由 main 走 CommandBar 编辑路径,不进这里。
-InputText :: proc(data : []byte) {
-	ConsoleExitReview()
-	FeedConsole(data)
-}
+// 输入语义(退出 review + 活动标记 + 写)统一在 FeedConsole。
 
 // 焦点窗口的 console(绑定动作的目标)
 focusConsole :: proc() -> ^Console {

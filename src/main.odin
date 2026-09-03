@@ -25,7 +25,7 @@ main :: proc() {
 		return
 	}
 
-	// 主题:Dracula(换主题只改这一行;默认 = canvas.DEFAULT_THEME)
+	//MAIN LOOP标准循环
 
 	for {
 		input.BeginFrame() // 清上一帧边沿(事件泵先于本模块调用)
@@ -93,14 +93,10 @@ initWindows :: proc() -> bool {
 	canvas.SetKeyBinding(.TAB, {.Ctrl, .Shift}, canvas.ParsedCommand { kind = .PagePrev })
 
 
-	// 默认启动:新建窗口自动 设 FiraCode 26 → 启动 bash;
-	// 默认配置须在 PageNew 之前设置(只对之后创建的窗口生效)
-	
-	// 调试会话:cmd.exe(msys2 bash 在受限宿主下 CreateFileMapping 失败;
-	// 在你自己的终端会话里按环境换回 msys2_shell.cmd)
 	canvas.SetDefaultLaunch(
-		"bash.exe",
-		"Consolas", 26)
+		"bash",
+		"Cascadia Code", 26)
+
 	// 第一页:页根 + 根窗(自动启动默认),成为当前页
 	page := canvas.PageNew()
 	if page.id == 0 {

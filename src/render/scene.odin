@@ -421,40 +421,45 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 		drawDecoLine(line, col_limit, r, console, m, theme.fg)
 	}
 
-	// 光标(DECSCUSR):0/1 块(闪烁) 2 块 3/4 下划线 5/6 竖线。
-	// 闪烁样式按 500ms 相位亮/灭;块状先画块再用底色重绘字形,条形不遮字形无需重绘。
-	if !bg && console.vt.cursor_visible && cursorBlinkOn(console.vt.cursor_style) {
+	// 光标(DECSCUSR):0/1 块 2 块(常亮) 3/4 下划线 5/6 竖线。
+	// 动画:位置 QuadOut 插值;闪烁 = 硬相位亮灭(无渐变,亮灭各半)。
+	// 块状先画块再用底色重绘字形,条形不遮字形无需重绘。
+	if !bg && console.vt.cursor_visible {
 		cr := int(console.cursor_row) - visible_top
 		if cr >= 0 && cr < int(console.rows) {
 			cx := console.origin_x + f32(console.cursor_col) * m.cell_width
 			cy := console.origin_y + f32(cr) * m.cell_height
 			style := console.vt.cursor_style
-			switch {
-			case style == 3 || style == 4: // 下划线:贴格底
-				uh := max(2.0, m.cell_height * 0.08)
-				DrawRect(cx, cy + m.cell_height - uh, m.cell_width, uh, theme.cursor)
-			case style == 5 || style == 6: // 竖线:贴格左边缘,1px
-				DrawRect(cx, cy, 1.0, m.cell_height, theme.cursor)
-			case: // 0/1/2:块;停在宽字符首格时画 2 格宽(覆盖续列)
-				cw := m.cell_width
-				line_idx := visible_top + cr
-				if line_idx < len(tb.lines) {
-					line := &tb.lines[line_idx]
-					if int(console.cursor_col) < len(line.cells) {
-						cell := line.cells[int(console.cursor_col)]
-						if cell.cp != 0 && cell.wide {
-							cw = m.cell_width * 2
+			rx, ry := CursorAnimEval(win.console_id, cx, cy, now_ms())
+			a := BlinkAlpha(style, now_ms(), console.input_activity_ms)
+			if a > 0 { // 闪烁灭相位:不绘制
+				switch {
+				case style == 3 || style == 4: // 下划线:贴格底
+					uh := max(2.0, m.cell_height * 0.08)
+					DrawRect(rx, ry + m.cell_height - uh, m.cell_width, uh, theme.cursor)
+				case style == 5 || style == 6: // 竖线:贴格左边缘,1px
+					DrawRect(rx, ry, 1.0, m.cell_height, theme.cursor)
+				case: // 0/1/2:块;停在宽字符首格时画 2 格宽(覆盖续列)
+					cw := m.cell_width
+					line_idx := visible_top + cr
+					if line_idx < len(tb.lines) {
+						line := &tb.lines[line_idx]
+						if int(console.cursor_col) < len(line.cells) {
+							cell := line.cells[int(console.cursor_col)]
+							if cell.cp != 0 && cell.wide {
+								cw = m.cell_width * 2
+							}
 						}
 					}
-				}
-				DrawRect(cx, cy, cw, m.cell_height, theme.cursor)
-				if line_idx < len(tb.lines) {
-					line := &tb.lines[line_idx]
-					if int(console.cursor_col) < len(line.cells) {
-						cell := line.cells[int(console.cursor_col)]
-						if cell.cp != 0 {
-							// 粗体字符同样双描重绘(否则光标块下残留 1px 粗体边)
-							drawCellGlyph(win.font_id, cell.cp, 0, 0, cx, cy + m.ascent, theme.bg, false, false, false)
+					DrawRect(rx, ry, cw, m.cell_height, theme.cursor)
+					if line_idx < len(tb.lines) {
+						line := &tb.lines[line_idx]
+						if int(console.cursor_col) < len(line.cells) {
+							cell := line.cells[int(console.cursor_col)]
+							if cell.cp != 0 {
+								// 粗体字符同样双描重绘(否则光标块下残留 1px 粗体边)
+								drawCellGlyph(win.font_id, cell.cp, 0, 0, cx, cy + m.ascent, theme.bg, false, false, false)
+							}
 						}
 					}
 				}

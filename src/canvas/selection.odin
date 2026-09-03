@@ -563,13 +563,12 @@ CopySelection :: proc() -> bool {
 	return inp.SetClipboardText(txt)
 }
 
-// 粘贴到焦点窗口(与键输入同路径:退出 review + Feed;剪贴板空/无焦点 = false)
+// 粘贴到焦点窗口(与键输入同路径:FeedConsole 统一承担退出 review;剪贴板空/无焦点 = false)
 PasteClipboard :: proc() -> bool {
 	data := inp.GetClipboardText()
 	if len(data) == 0 {
 		return false
 	}
 	defer delete(data)
-	ConsoleExitReview()
 	return FeedConsole(data)
 }

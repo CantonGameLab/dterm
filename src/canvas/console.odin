@@ -28,6 +28,9 @@ Console :: struct {
 	conpty_handle : mem.Handle, // 绑定的 ConPTY
 
 	font_size : f32, // 创建时的目标字号
+
+	input_activity_ms : u64, // 最近用户输入活动时刻(FeedConsole 唯一写点;
+	// render 用于"输入期间光标不闪烁"判定;0 = 从未输入)
 }
 
 consoles : mem.GenArray(MAX_CONSOLE_SLOTS, Console)
@@ -181,24 +184,27 @@ ConsoleSetSize :: proc(console_h : mem.Handle, rows, cols : u16) -> bool {
 	return true
 }
 
-// iterm 几何变化时由渲染层每帧调用(transform 现算不存):
-// 取整出 cols/rows,网格在 iterm 内居中;cols/rows 变化后 ConPTY 尺寸由调用方联动
 ConsoleUpdateLayout :: proc(console_h : mem.Handle, t : Transform, cell_w, cell_h : f32) -> bool {
 	console := GetConsole(console_h)
+
 	if console == nil || cell_w <= 0 || cell_h <= 0 {
 		return false
 	}
+
 	rows := max(1, int(t.height / cell_h))
 	cols := max(1, int(t.width / cell_w))
+
 	if console.vt.deccolm {
 		cols = 132 // DECCOLM 132 列模式覆盖布局计算
 	}
 	applyConsoleSize(console, u16(rows), u16(cols))
+
 	if console.vt.deccolm {
 		console.origin_x = t.position_x // 132 列超出窗口:左对齐
 	} else {
 		console.origin_x = t.position_x + (t.width - f32(cols) * cell_w) * 0.5
 	}
+
 	console.origin_y = t.position_y + (t.height - f32(rows) * cell_h) * 0.5
 	// 网格起点取整到像素:origin 带 .5 时背景矩形与字形(各自取整)会错位 1px
 	console.origin_x = math.round(console.origin_x)

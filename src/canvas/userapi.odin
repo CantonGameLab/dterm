@@ -477,7 +477,9 @@ LaunchConsole :: proc(cmd : string, id : mem.Handle = {}) -> bool {
 	return true
 }
 
-// 通过 conpty 向 id(或焦点)window 的 console 应用输入字符串
+// 通过 conpty 向 id(或焦点)window 的 console 应用输入字符串。
+// 用户输入统一语义:退出 review(历史查看 → 输入即回实时)+ 活动标记
+// (输入期间光标暂停闪烁,render 消费)+ 写 ConPTY。
 FeedConsole :: proc(data : []byte, id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -491,6 +493,10 @@ FeedConsole :: proc(data : []byte, id : mem.Handle = {}) -> bool {
 	if console == nil {
 		return false
 	}
+	if tb := GetTermBuffer(console.active_term_buffer_id); tb != nil {
+		tb.review_line = 0 // 输入即回普通模式(实时跟随)
+	}
+	console.input_activity_ms = inp.NowTicks()
 	// conpty 句柄无效(工具 console 等)由 WriteConptyInput 内部返回 false
 	_, ok := ct.WriteConptyInput(console.conpty_handle, data)
 	return ok
@@ -586,7 +592,7 @@ updateWindow :: proc(node_h : mem.Handle) {
 //                    新输出到达时不动(视口内容稳定),trim 裁剪时平移补偿
 //   滚回最新       = review_line 置 0(与"底行索引+1 == len"等价,避免
 //                    "底行 = 0"与普通模式哨兵冲突)
-// 输入字节前的退出(键盘任意输入回到普通模式)由绑定层调 ConsoleExitReview。
+// 输入即退出 review 由 FeedConsole 统一承担(用户输入语义内聚)。
 ConsoleScroll :: proc(delta : int, id : mem.Handle = {}) -> bool {
 	node_h := resolveWindow(id)
 	if node_h.id == 0 {
@@ -614,28 +620,6 @@ ConsoleScroll :: proc(delta : int, id : mem.Handle = {}) -> bool {
 	} else {
 		tb.review_line = u32(nl + 1)
 	}
-	return true
-}
-
-// 退出 review 回到普通模式(实时跟随)。键盘输入等"立即回到当前"动作的绑定目标。
-ConsoleExitReview :: proc(id : mem.Handle = {}) -> bool {
-	node_h := resolveWindow(id)
-	if node_h.id == 0 {
-		return false
-	}
-	win := NodeWindow(node_h)
-	if win == nil {
-		return false
-	}
-	console := GetConsole(win.console_id)
-	if console == nil {
-		return false
-	}
-	tb := GetTermBuffer(console.active_term_buffer_id)
-	if tb == nil {
-		return false
-	}
-	tb.review_line = 0
 	return true
 }
 

@@ -3,7 +3,7 @@
 //   1. 树遍历:布局 + 消费各会话输出(vtparse → 状态),Resize 联动 ConPTY
 //   2. 会话轮询:auto_close 销毁;全部窗口关闭返回 false
 //   3. 绑定层:键鼠动作(绑定表 → 用户接口)
-//   4. 文本路由:bar 可见 → CommandBar 编辑状态机;否则 → 应用(退出 review + Feed)
+//   4. 文本路由:bar 可见 → CommandBar 编辑状态机;否则 → FeedConsole(输入语义)
 package canvas
 
 import mem "../memory"
@@ -28,7 +28,7 @@ Update :: proc() -> bool {
 		}
 	} else {
 		if buf := inp.TakeAppInput(); len(buf) > 0 {
-			InputText(buf)
+			FeedConsole(buf)
 		}
 	}
 
