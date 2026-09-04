@@ -1,9 +1,9 @@
-// 指令语法解析 + 数据化命令执行:
+// 指令语法解析 + 数据化命令执行(动作层唯一入口):
 //   ParseCommandString:字符串 → ParsedCommand(命令数据)
 //   ExecuteCommandString:字符串快捷入口(解析 + 执行)
-//   ExecuteCommand:ParsedCommand → userapi(唯一命令解释器;
-//     快捷键绑定表(keybindings)生成的命令数据也走这里,不做第二次分派)
-// 供控制台交互 / 子进程 ANSI 指令通道使用。薄分派层,无 undo / 无历史栈。
+//   ExecuteCommand:ParsedCommand → 各模块 userapi(唯一命令解释器;
+//     快捷键绑定表(keybindings.odin 本包)生成的命令数据也走这里,不做第二次分派)
+// 供控制台交互(命令栏) / 子进程 ANSI 指令通道使用。薄分派层,无 undo / 无历史栈。
 // 语法:命令名 参数... [@id]
 //   - 参数按空格分隔,"..." 包裹字符串
 //   - @id 放末尾指定目标节点(缺省 = 当前焦点)
@@ -11,12 +11,13 @@
 //     (大小写不敏感,如 f2/alt+shift+l/ctrl+shift+=);目标命令 = 带引号命令字符串
 // 例:split right 0.5 / split left / split up / focus left / font "a.ttf" 40 /
 //    launch "cmd.exe" @3 / bind alt+shift+l "split right" / unbind f2 / bindings
-package canvas
+package command
 
-import "core:fmt"
-import "core:strings"
+import cv "../canvas"
 import inp "../input"
 import mem "../memory"
+import "core:fmt"
+import "core:strings"
 
 // 执行命令字符串;查询类命令的结果经 out 回调回传(控制台显示用)。
 // 返回 false = 语法错误或执行失败。bind 的子命令槽随消费释放。
@@ -32,50 +33,57 @@ ExecuteCommandString :: proc(s : string, out : proc(msg : string) = nil) -> bool
 	return ExecuteCommand(cmd, out)
 }
 
+// 每帧唯一入口(main,canvas.Update 之前):键绑定消费(命中即置 consumed)+
+// 命令事件消费(上一帧命令栏提交的队列;结果写回事件槽,canvas 帧内读回)。
+Update :: proc() {
+	ProcessKeys()
+	processCommandEvents()
+}
+
 // 数据化命令 → userapi(唯一解释器;kind 全集见 CommandStringKind)
 ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> bool {
 	switch cmd.kind {
 	case .Split:
 		// :split <left|right|up|down> [factor] [@id];left/up = 新窗在首侧
-		return SplitNewWindow(cmd.dir, cmd.target, cmd.split_first) != mem.Handle {}
+		return cv.SplitNewWindow(cmd.dir, cmd.target, cmd.split_first) != mem.Handle {}
 	case .FocusId:
-		return SetFocusWindow(cmd.target)
+		return cv.SetFocusWindow(cmd.target)
 	case .FocusDir:
-		return FocusMove(cmd.fdir, cmd.target)
+		return cv.FocusMove(cmd.fdir, cmd.target)
 	case .Destroy:
-		return DestroyWindow(cmd.target)
+		return cv.DestroyWindow(cmd.target)
 	case .Factor:
-		return SetSplitFactor(cmd.fval, cmd.target)
+		return cv.SetSplitFactor(cmd.fval, cmd.target)
 	case .FactorLeaf:
-		return SetSplitFactorLeaf(cmd.ival, cmd.fval)
+		return cv.SetSplitFactorLeaf(cmd.ival, cmd.fval)
 	case .Exchange:
-		return ExchangeWindow(cmd.fdir, cmd.target)
+		return cv.ExchangeWindow(cmd.fdir, cmd.target)
 	case .Font:
 		if cmd.sval == "" {
 			// "font 44" / 空名称 = 只改当前字体大小(名称缺省用当前字体)
-			return SetWindowFontSize(cmd.fval, cmd.target)
+			return cv.SetWindowFontSize(cmd.fval, cmd.target)
 		}
-		return SetWindowFont(cmd.sval, cmd.fval, cmd.target)
+		return cv.SetWindowFont(cmd.sval, cmd.fval, cmd.target)
 	case .FontSize:
-		return SetWindowFontSize(cmd.fval, cmd.target)
+		return cv.SetWindowFontSize(cmd.fval, cmd.target)
 	case .FontSizeUp:
-		return AdjustFontSize(2, cmd.target)
+		return cv.AdjustFontSize(2, cmd.target)
 	case .FontSizeDown:
-		return AdjustFontSize(-2, cmd.target)
+		return cv.AdjustFontSize(-2, cmd.target)
 	case .Launch:
-		return LaunchConsole(cmd.sval, cmd.target)
+		return cv.LaunchConsole(cmd.sval, cmd.target)
 	case .Feed:
-		return FeedConsole(transmute([]u8)cmd.sval, cmd.target)
+		return cv.FeedConsole(transmute([]u8)cmd.sval, cmd.target)
 	case .AutoClose:
-		return SetAutoClose(cmd.bval, cmd.target)
+		return cv.SetAutoClose(cmd.bval, cmd.target)
 	case .Scroll:
-		return ConsoleScroll(int(cmd.fval), cmd.target)
+		return cv.ConsoleScroll(int(cmd.fval), cmd.target)
 	case .ReviewUp:
-		return ConsoleScroll(-focusRows(cmd.target), cmd.target)
+		return cv.ConsoleScroll(-focusRows(cmd.target), cmd.target)
 	case .ReviewDown:
-		return ConsoleScroll(focusRows(cmd.target), cmd.target)
+		return cv.ConsoleScroll(focusRows(cmd.target), cmd.target)
 	case .ToggleCommandBar:
-		ToggleCommandBar()
+		cv.ToggleCommandBar()
 		return true
 	case .SetBinding:
 		// :bind <mods+key> "<命令字符串>" — 子命令已由解析层解析入表(sub 句柄),执行只读
@@ -100,55 +108,55 @@ ExecuteCommand :: proc(cmd : ParsedCommand, out : proc(msg : string) = nil) -> b
 		}
 		return true
 	case .PageNew:
-		return PageNew().id != 0
+		return cv.PageNew().id != 0
 	case .PageSwitch:
 		// :page <n> — n = 页存活序(1-based)
-		h := PageByIndex(cmd.ival)
+		h := cv.PageByIndex(cmd.ival)
 		if h.id == 0 {
 			return false
 		}
-		return PageSwitch(h)
+		return cv.PageSwitch(h)
 	case .PageNext:
-		return PageNext()
+		return cv.PageNext()
 	case .PagePrev:
-		return PagePrev()
+		return cv.PagePrev()
 	case .PageClose:
-		return PageDestroy(PageCurrent())
-	case .CopySelection:
-		return CopySelection()
-	case .PasteClipboard:
-		return PasteClipboard()
-	case .SelectionClear:
-		SelectionClear()
-		return true
-	case .SelectAll:
-		return SelectionSelectAll()
+		return cv.PageDestroy(cv.PageCurrent())
 	case .Count:
 		if out != nil {
-			out(fmt.tprintf("windows: %d", WindowCount()))
+			out(fmt.tprintf("windows: %d", cv.WindowCount()))
 		}
 		return true
 	case .FocusGet:
 		if out != nil {
-			f := GetFocusWindow()
+			f := cv.GetFocusWindow()
 			out(fmt.tprintf("focus: %d", f.id))
 		}
 		return true
+	case .CopySelection:
+		return cv.CopySelection()
+	case .PasteClipboard:
+		return cv.PasteClipboard()
+	case .SelectionClear:
+		cv.SelectionClear()
+		return true
+	case .SelectAll:
+		return cv.SelectionSelectAll()
 	}
 	return false
 }
 
 // 焦点(或 target)console 的行数;无 console 返回 0(翻页/滚动安全空转)
 focusRows :: proc(target : mem.Handle) -> int {
-	node_h := resolveWindow(target)
+	node_h := target
 	if node_h.id == 0 {
-		return 0
+		node_h = cv.GetFocusWindow()
 	}
-	win := NodeWindow(node_h)
+	win := cv.NodeWindow(node_h)
 	if win == nil {
 		return 0
 	}
-	console := GetConsole(win.console_id)
+	console := cv.GetConsole(win.console_id)
 	if console == nil {
 		return 0
 	}
@@ -194,9 +202,9 @@ CommandStringKind :: enum u8 {
 ParsedCommand :: struct {
 	kind : CommandStringKind,
 	target : mem.Handle, // @id 解析出的节点(带世代);0 = 焦点
-	dir : SplitType, // Split 用(轴)
+	dir : cv.SplitType, // Split 用(轴)
 	split_first : bool, // Split:新窗在首侧(左/上);false = 右/下
-	fdir : FocusDirection, // Focus 用;Exchange 仅 Left/Right(叶子序)
+	fdir : cv.FocusDirection, // Focus 用;Exchange 仅 Left/Right(叶子序)
 	fval : f32, // Factor/Font
 	ival : int, // FactorLeaf:叶子序号(1-based)
 	bval : bool, // AutoClose
@@ -232,7 +240,7 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 		if !ok {
 			return {}, false
 		}
-		pc.target = NodeHandleById(id)
+		pc.target = cv.NodeHandleById(id)
 		argn = n - 2
 	}
 	args := tokens[1:1 + argn]
@@ -263,7 +271,7 @@ ParseCommandString :: proc(s : string) -> (ParsedCommand, bool) {
 		}
 		if id, ok := parseU32(args[0]); ok {
 			pc.kind = .FocusId
-			pc.target = NodeHandleById(id)
+			pc.target = cv.NodeHandleById(id)
 		} else if d, ok := parseFocusDir(args[0]); ok {
 			pc.kind = .FocusDir
 			pc.fdir = d
@@ -603,7 +611,7 @@ parseF32 :: proc(s : string) -> (f32, bool) {
 }
 
 // split 方向词 → (轴, 新窗在首侧(左/上), ok)。left/up = 新窗在首侧。
-parseSplitDir :: proc(s : string) -> (SplitType, bool, bool) {
+parseSplitDir :: proc(s : string) -> (cv.SplitType, bool, bool) {
 	switch s {
 	case "right", "leftright", "h":
 		return .LeftRight, false, true
@@ -617,7 +625,7 @@ parseSplitDir :: proc(s : string) -> (SplitType, bool, bool) {
 	return {}, false, false
 }
 
-parseFocusDir :: proc(s : string) -> (FocusDirection, bool) {
+parseFocusDir :: proc(s : string) -> (cv.FocusDirection, bool) {
 	switch s {
 	case "left":
 		return .Left, true

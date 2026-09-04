@@ -4,6 +4,7 @@
 package main
 
 import cv "../../src/canvas"
+import cmd "../../src/command"
 import "core:fmt"
 
 check :: proc(name : string, got, want : $T) {
@@ -153,13 +154,13 @@ main :: proc() {
 	// ---- SelectionClear + 命令解析 ----
 	cv.SelectionClear()
 	check("clear -> invalid", cv.SelectionValid(), false)
-	pc, okp := cv.ParseCommandString("copy")
-	check("parse copy", okp && pc.kind == cv.CommandStringKind.CopySelection, true)
-	pc2, okp2 := cv.ParseCommandString("paste")
-	check("parse paste", okp2 && pc2.kind == cv.CommandStringKind.PasteClipboard, true)
-	pc3, okp3 := cv.ParseCommandString("clearselection")
-	check("parse clearselection", okp3 && pc3.kind == cv.CommandStringKind.SelectionClear, true)
-	cv.ExecuteCommand(pc3)
+	pc, okp := cmd.ParseCommandString("copy")
+	check("parse copy", okp && pc.kind == cmd.CommandStringKind.CopySelection, true)
+	pc2, okp2 := cmd.ParseCommandString("paste")
+	check("parse paste", okp2 && pc2.kind == cmd.CommandStringKind.PasteClipboard, true)
+	pc3, okp3 := cmd.ParseCommandString("clearselection")
+	check("parse clearselection", okp3 && pc3.kind == cmd.CommandStringKind.SelectionClear, true)
+	cmd.ExecuteCommand(pc3)
 	check("exec clear noop", cv.SelectionValid(), false)
 
 	// ==== M3:词选/行选/全选 ====
@@ -207,8 +208,8 @@ main :: proc() {
 
 	// 全选(无焦点 → false 空操作;有焦点场景走 GUI)
 	check("selectall no focus", cv.SelectionSelectAll(), false)
-	pc4, okp4 := cv.ParseCommandString("selectall")
-	check("parse selectall", okp4 && pc4.kind == cv.CommandStringKind.SelectAll, true)
+	pc4, okp4 := cmd.ParseCommandString("selectall")
+	check("parse selectall", okp4 && pc4.kind == cmd.CommandStringKind.SelectAll, true)
 
 	fmt.println("seltest done")
 }

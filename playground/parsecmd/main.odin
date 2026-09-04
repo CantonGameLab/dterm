@@ -2,6 +2,7 @@
 package main
 
 import cv "../../src/canvas"
+import cmd "../../src/command"
 import "core:fmt"
 
 main :: proc() {
@@ -18,7 +19,7 @@ main :: proc() {
 		`count`,
 	}
 	for t in tests {
-		pc, ok := cv.ParseCommandString(t)
+		pc, ok := cmd.ParseCommandString(t)
 		fmt.printf("%-40q ok=%v kind=%v target=%d sval=%q fval=%v\n", t, ok, pc.kind, pc.target.id, pc.sval, pc.fval)
 	}
 }

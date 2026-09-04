@@ -1,6 +1,5 @@
-// 输入绑定层:输入设备事件 → 数据化命令。
-// 单向管线:事件(input 通道)→ [mods+key] 查绑定表 → ParsedCommand(数据化 userapi
-// 封装)→ ExecuteCommand(唯一解释器);命中 = 纯动作(序列不进应用)。
+// 鼠标路由(功能层):消费 input 鼠标通道 → 窗口交互。
+// 键绑定/命令在 command 模块(消费链:command 先行);本文件只管鼠标。
 // 鼠标:滚轮 → review、点击 → 聚焦、应用鼠标模式(1000/1002/1003)→ SGR 编码写回。
 package canvas
 
@@ -10,92 +9,7 @@ import inp "../input"
 import mem "../memory"
 import "core:fmt"
 
-// ---------------------------------------------------------------------------
-// 快捷键绑定表(数据化):组合键(mods+key)→ 数据化命令
-// ---------------------------------------------------------------------------
-
-// 组合修饰:Alt/Ctrl/Shift 自由组合;规则 = Shift 不得单独出现(须与 Alt/Ctrl 伴生)
-KeyMod :: enum u8 {
-	Alt,
-	Ctrl,
-	Shift,
-	Win, // 事件侧保留(绑定表不用;事件含 Win 时与绑定不匹配)
-}
-
-KeyMods :: bit_set[KeyMod; u8]
-
-// input 修饰字节(1=Shift 2=Alt 4=Ctrl 8=Win)→ KeyMods
-modsFromByte :: proc(m : u8) -> KeyMods {
-	s : KeyMods
-	if m & 1 != 0 {
-		s += {.Shift}
-	}
-	if m & 2 != 0 {
-		s += {.Alt}
-	}
-	if m & 4 != 0 {
-		s += {.Ctrl}
-	}
-	if m & 8 != 0 {
-		s += {.Win}
-	}
-	return s
-}
-
-// 一条绑定:触发 = mods+key;动作 = 数据化命令(与字符串指令共用 ParsedCommand)
-Binding :: struct {
-	key : inp.Scancode,
-	mods : KeyMods,
-	cmd : ParsedCommand,
-}
-
-// 默认绑定表(唯一实例):结构 = 槽数组 + 计数。读写经 GetKeyBindings 指针
-// 直接操作;userapi(SetKeyBinding/ClearKeyBindings/...)是面向用户的表操作接口。
-MAX_DEFAULT_BINDINGS :: 32
-
-KeyBindings :: struct {
-	bindings : [MAX_DEFAULT_BINDINGS]Binding,
-	count : int,
-}
-
-key_bindings : KeyBindings
-
-GetKeyBindings :: proc() -> ^KeyBindings {
-	return &key_bindings
-}
-
-// 查绑定:精确匹配 (key, mods);命中返回命令(表由 main 配置/用户 bind 命令填充)
-findBinding :: proc(sc : u32, mods : KeyMods) -> (Binding, bool) {
-	//if mods == {.Shift} {
-	//	return {}, false // Shift 单独 = 非法触发(不参与匹配)
-	//}
-	kb := GetKeyBindings()
-	for i in 0 ..< kb.count {
-		b := &kb.bindings[i]
-		if u32(b.key) == sc && b.mods == mods {
-			return b^, true
-		}
-	}
-	return {}, false
-}
-
-// 每帧调用(事件已入 input 通道):绑定表 → ExecuteCommand(数据化动作)
-ProcessKeys :: proc() {
-	n := inp.KeyEventCount()
-	for i in 0 ..< n {
-		ev := inp.KeyEventGet(i)
-		if ev == nil {
-			continue
-		}
-		if b, ok := findBinding(ev.sc, modsFromByte(ev.mods)); ok {
-			ExecuteCommand(b.cmd)
-			ev.consumed = true // 动作已执行,序列不再进应用
-		}
-	}
-	// 输入路由由 main 决定:bar 可见 → CommandBar 编辑状态机;否则 TakeAppInput → InputText
-}
-
-// 每帧调用(main):消费 input 包鼠标状态。
+// 每帧调用(main,canvas.Update 内):消费 input 包鼠标状态。
 // 命中规则:活动拖拽独占(结束/取消/更新);底部页签条优先(页操作,不落窗口树);
 // 否则左键命中分割条 → 开始拖拽(UI 优先于应用模式,WT 行为);应用鼠标模式
 // (?1000/1002/1003)再接管;最后鼠标点所在 leaf = 动作目标。
@@ -187,11 +101,6 @@ ProcessMouse :: proc() {
 		ConsoleScroll(-int(m.wheel), node_h)
 	}
 }
-
-// 键盘文本输入:任一键盘输入先退出 review 回普通模式(终端惯例:
-// WS 等终端在滚动查看时产生输入即回到实时),再交给焦点窗口应用。
-// CommandBar 模态可见时由 main 走 CommandBar 编辑路径,不进这里。
-// 输入语义(退出 review + 活动标记 + 写)统一在 FeedConsole。
 
 // 焦点窗口的 console(绑定动作的目标)
 focusConsole :: proc() -> ^Console {

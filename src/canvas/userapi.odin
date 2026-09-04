@@ -61,55 +61,6 @@ applyDefaultLaunch :: proc(node_h : mem.Handle) {
 }
 
 // ---------------------------------------------------------------------------
-// 快捷键绑定(数据化表操作:键位 → 命令的映射是配置数据)
-// ---------------------------------------------------------------------------
-// 添加/覆盖一条绑定(同 key+mods 覆盖已有);表满返回 false
-SetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods, cmd : ParsedCommand) -> bool {
-	kb := GetKeyBindings()
-	for i in 0 ..< kb.count {
-		if kb.bindings[i].key == key && kb.bindings[i].mods == mods {
-			kb.bindings[i].cmd = cmd
-			return true
-		}
-	}
-	if kb.count >= MAX_DEFAULT_BINDINGS {
-		return false
-	}
-	kb.bindings[kb.count] = Binding { key = key, mods = mods, cmd = cmd }
-	kb.count += 1
-	return true
-}
-
-// 清空绑定表(重复初始化 = 清零重建,无状态判定)
-ClearKeyBindings :: proc() {
-	GetKeyBindings().count = 0
-}
-
-// 移除一条绑定(不存在 = false;交换删除,顺序无关)
-UnsetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> bool {
-	kb := GetKeyBindings()
-	for i in 0 ..< kb.count {
-		if kb.bindings[i].key == key && kb.bindings[i].mods == mods {
-			kb.bindings[i] = kb.bindings[kb.count - 1]
-			kb.count -= 1
-			return true
-		}
-	}
-	return false
-}
-
-// 按 (key, mods) 查询绑定
-GetKeyBinding :: proc(key : inp.Scancode, mods : KeyMods) -> (Binding, bool) {
-	kb := GetKeyBindings()
-	for i in 0 ..< kb.count {
-		if kb.bindings[i].key == key && kb.bindings[i].mods == mods {
-			return kb.bindings[i], true
-		}
-	}
-	return {}, false
-}
-
-// ---------------------------------------------------------------------------
 // 窗口树
 // ---------------------------------------------------------------------------
 // 当前页建根窗(页根已由 PageCreate 分配):挂新窗(幂等)+ 默认启动配置应用 + 设焦点。

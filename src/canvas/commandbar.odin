@@ -1,6 +1,8 @@
 // 命令栏数据(全局单例,集成在底部页签条右侧):输入缓冲 + 光标编辑状态。
 // 单一实例:一次只服务"执行动作"(命令以焦点/目标窗口执行);可见性 = 全局开关
 // (F2 切换);渲染在 render/scene(条内输入框),输入状态机(esc 序列)在本模块。
+// 提交 = PushCommand 入"命令事件队列"(本文件数据;command 模块每帧消费并回写
+// result 槽 → 本模块帧尾 CommandEventsReap 读回,跨层零环)。
 package canvas
 
 import "core:fmt"
@@ -16,6 +18,69 @@ CommandBar :: struct {
 
 command_bar : CommandBar
 command_bar_visible : bool
+
+// ---------------------------------------------------------------------------
+// 命令事件队列(canvas 生产 → command 消费;异步执行闭环)
+// ---------------------------------------------------------------------------
+MAX_COMMAND_EVENTS :: 16
+
+CommandEvent :: struct {
+	text : [256]u8, // 待执行命令字符串(命令栏提交)
+	len : u8,
+	result : [512]u8, // 执行结果槽(查询类回显,command 写入)
+	result_len : u16,
+	ok : bool, // 执行成功(命令消费后写)
+	done : bool, // 已执行(结果有效;canvas 读回后移除)
+}
+
+command_events : [MAX_COMMAND_EVENTS]CommandEvent
+command_event_count : int
+
+// 命令栏提交(生产;队列满返回 false)
+PushCommand :: proc(s : string) -> bool {
+	if command_event_count >= MAX_COMMAND_EVENTS {
+		return false
+	}
+	ev := &command_events[command_event_count]
+	n := min(len(s), len(ev.text))
+	copy(ev.text[:n], s)
+	ev.len = u8(n)
+	ev.result_len = 0
+	ev.ok, ev.done = false, false
+	command_event_count += 1
+	return true
+}
+
+CommandEventsCount :: proc() -> int {
+	return command_event_count
+}
+
+// command 取值(只写 result/ok/done 字段)
+CommandEventAt :: proc(i : int) -> ^CommandEvent {
+	if i < 0 || i >= command_event_count {
+		return nil
+	}
+	return &command_events[i]
+}
+
+// 帧尾读回(本模块):已执行事件移除;失败回显日志(M3 起经 result 槽显示)
+CommandEventsReap :: proc() {
+	i := 0
+	for i < command_event_count {
+		ev := &command_events[i]
+		if !ev.done {
+			i += 1
+			continue
+		}
+		if !ev.ok {
+			fmt.eprintfln("CMD FAILED: %s", string(ev.text[:ev.len]))
+		}
+		n := command_event_count - 1
+		command_events[i] = command_events[n]
+		command_events[n] = {}
+		command_event_count = n
+	}
+}
 
 // 切换命令栏(全局):开 = 清空编辑状态
 ToggleCommandBar :: proc() -> bool {
@@ -250,21 +315,12 @@ cmdBarKey :: proc(b : u8) {
 	}
 }
 
-// 取走命令栏输入并执行。
-// 成功:关闭命令栏;失败:保持打开 + 回显错误,便于修正。
+// 取走命令栏输入并提交(异步:入事件队列,command 模块每帧消费;
+// 结果经事件槽回读;失败回显见 CommandEventsReap)。
 execCmdBar :: proc() {
 	cmd := CommandBarTake()
 	if len(cmd) > 0 {
-		// 命令栏是专用命令框,无 ':' 前缀
-		if ExecuteCommandString(cmd) {
-			ToggleCommandBar()
-		} else {
-			// 失败:回显错误提示,命令栏保持打开
-			fmt.eprintln("CMD FAILED:", cmd)
-			err := "<cmd error>"
-			CommandBarInsert(transmute([]u8)err)
-		}
-	} else {
-		ToggleCommandBar()
+		PushCommand(cmd)
 	}
+	ToggleCommandBar() // 提交即关闭(成功/失败回显在结果槽)
 }
