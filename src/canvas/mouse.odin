@@ -75,13 +75,16 @@ splitDragUpdate :: proc(m : ^inp.MouseState) {
 }
 
 // 光标反馈:拖拽常驻轴光标;悬停条 → 轴光标;其余默认。
-// 无位置/按压中保持当前光标(脉冲只在悬停与拖拽时切换)。
+// 只在鼠标移动帧查询(静止帧零树遍历,光标保持上次);无位置/按压中不切换。
 updateCursor :: proc() {
 	if split_drag.active {
 		if node := GetWindowTreeNode(split_drag.target); node != nil {
 			inp.SetCursor(axisCursor(node.split_type))
 			return
 		}
+	}
+	if !inp.Mouse.moved {
+		return // 静止帧:光标不动,不查询(热路径零开销)
 	}
 	if !inp.Mouse.x_ok || inp.Mouse.left || inp.Mouse.press != 0 {
 		return

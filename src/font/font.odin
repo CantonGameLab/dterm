@@ -688,11 +688,19 @@ GetGlyphById :: proc(h : mem.Handle, gid : u16) -> (Glyph, bool) {
 	return glyphFromSlot(slot), true
 }
 
-// 主字体 glyph id(连体输入);0 = 主字体无此字符(fallback 或不可渲染)
+// 主字体 glyph id(连体输入);0 = 主字体无此字符(fallback 或不可渲染)。
+// 热路径缓存:字形槽已建(位图缓存过)直接读槽内 gid(省 stbtt 查询);
+// 槽的 gid 仅在光栅化主 face 时记录(rasterCommon 后由 glyphRasterize 填)。
 GlyphIndex :: proc(h : mem.Handle, cp : rune) -> u16 {
 	font := GetFont(h)
 	if font == nil {
 		return 0
+	}
+	if slot := slotFind(h, cp); slot != nil {
+		if slot.face_index == 0 {
+			return slot.gid
+		}
+		return 0 // fallback 面槽:主字体无此字符
 	}
 	return u16(stbtt.FindGlyphIndex(&font.faces[0].info, cp))
 }
@@ -816,7 +824,7 @@ slotFind :: proc(font_h : mem.Handle, cp : rune) -> ^GlyphSlot {
 	i := int(uint(cp) % uint(cap))
 	for {
 		slot := &font.slots[i]
-		if slot.cp == cp && slot.gid == 0 {
+		if slot.cp == cp {
 			return slot
 		}
 		if slot.cp == 0 && slot.gid == 0 {
@@ -976,14 +984,39 @@ rasterCommon :: proc(font_h : mem.Handle, face : ^Face, cp : rune, gid : c.int) 
 	}
 	atlasUpload(&font.atlas, x, y, u32(w) + 2 * ATLAS_PAD, u32(h) + 2 * ATLAS_PAD)
 
+	// box-drawing 等超高字形裁剪到 cell 高度(防相邻行交叠/竖线列断续瑕疵):
+	// 只调 yoff/高度/UV(位图本体不动,UV 指向位图子区)。
+	// cell 相对基线:顶 = -ascent,底 = cell_height - ascent。
+	xoff_v := f32(x0) + sub_x
+	yoff_v := f32(y0) + sub_y
+	cut_top : c.int
+	cell_top := -font.ascent
+	cell_bottom := font.cell_height - font.ascent
+	if yoff_v < cell_top {
+		cut := c.int(math.ceil(cell_top - yoff_v))
+		if cut >= h {
+			return {}, false // 整字形在 cell 上界之外:不画
+		}
+		yoff_v = cell_top
+		h -= cut
+		cut_top = cut
+	}
+	if yoff_v + f32(h) > cell_bottom {
+		cut := c.int(math.ceil(yoff_v + f32(h) - cell_bottom))
+		if cut >= h {
+			return {}, false
+		}
+		h -= cut
+	}
+
 	return GlyphSlot {
 		w = u16(w), h = u16(h),
-		xoff = f32(x0) + sub_x, yoff = f32(y0) + sub_y,
+		xoff = xoff_v, yoff = yoff_v,
 		advance = f32(advance) * scale,
 		u0 = f32(x + ATLAS_PAD) / f32(font.atlas.width),
-		v0 = f32(y + ATLAS_PAD) / f32(font.atlas.height),
+		v0 = f32(y + ATLAS_PAD + u32(cut_top)) / f32(font.atlas.height),
 		u1 = f32(x + ATLAS_PAD + u32(w)) / f32(font.atlas.width),
-		v1 = f32(y + ATLAS_PAD + u32(h)) / f32(font.atlas.height),
+		v1 = f32(y + ATLAS_PAD + u32(cut_top) + u32(h)) / f32(font.atlas.height),
 	}, true
 }
 
@@ -1002,6 +1035,10 @@ glyphRasterize :: proc(font_h : mem.Handle, cp : rune) -> bool {
 	}
 	slot.cp = cp
 	slot.face_index = u8(face_idx)
+	// 主 face 槽记录主字体 glyph id(GlyphIndex 缓存;fallback 面 = 0 = 主字体无)
+	if face_idx == 0 {
+		slot.gid = u16(stbtt.FindGlyphIndex(&font.faces[0].info, cp))
+	}
 	return slotInsert(font_h, slot)
 }
 

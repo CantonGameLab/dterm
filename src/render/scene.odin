@@ -25,7 +25,27 @@ DrawFrame :: proc() {
 	drawTabBar()
 	drawCommandBar()
 	drawFps()
-	FlushBatch()
+	flushBatch()
+
+	drawWalk :: proc(node_h : mem.Handle, bg : bool) {
+		node := cv.GetWindowTreeNode(node_h)
+		if node == nil {
+			return
+		}
+		if !node.is_leaf {
+			// 先画子树(背景被 frame 覆盖),再画分割条(分割条属前景,仅第 2 趟)
+			drawWalk(node.left_son_id, bg)
+			drawWalk(node.right_son_id, bg)
+			if !bg {
+				drawFrame(node_h)
+			}
+			return
+		}
+		win := cv.NodeWindow(node_h)
+		if win != nil {
+			drawConsole(node_h, bg) // 内部按 console 句柄判定,无 console 直返
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -240,25 +260,6 @@ mixColor :: proc(a, b : u32, t : f32) -> u32 {
 	return cr << 16 | cg << 8 | cb
 }
 
-drawWalk :: proc(node_h : mem.Handle, bg : bool) {
-	node := cv.GetWindowTreeNode(node_h)
-	if node == nil {
-		return
-	}
-	if !node.is_leaf {
-		// 先画子树(背景被 frame 覆盖),再画分割条(分割条属前景,仅第 2 趟)
-		drawWalk(node.left_son_id, bg)
-		drawWalk(node.right_son_id, bg)
-		if !bg {
-			drawFrame(node_h)
-		}
-		return
-	}
-	win := cv.NodeWindow(node_h)
-	if win != nil {
-		drawConsole(node_h, bg) // 内部按 console 句柄判定,无 console 直返
-	}
-}
 
 // 分割条:内部节点按 split_type 画一条 frame 宽度的色条(颜色读主题)
 drawFrame :: proc(node_h : mem.Handle) {
@@ -339,19 +340,10 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 			continue
 		}
 
-		// 逐行连体 shaping:cell cp → 主字体 glyph id,ShapeLine 原地替换
-		// 输出与输入一一对应,替换后的 id 用 GetGlyphById 绘制
-		resize(&draw_shaped, col_limit)
-		resize(&draw_orig, col_limit)
-		for c in 0 ..< col_limit {
-			g := fnt.GlyphIndex(win.font_id, line.cells[c].cp)
-			draw_orig[c] = g
-			draw_shaped[c] = g
-		}
-		fnt.ShapeLine(win.font_id, &draw_shaped)
-
-		// 连体合并(未来 type4)会缩短数组;绘制按缩短后的长度截断
-		draw_limit := min(col_limit, len(draw_shaped))
+		// 逐行连体 shaping 仅 fg 趟需要(bg 趟只画底色,不需要字形 id):
+		// cell cp → 主字体 glyph id,ShapeLine 原地替换;输出与输入一一对应,
+		// 替换后的 id 用 GetGlyphById 绘制。
+		draw_limit := col_limit
 		if bg {
 			// 第 1 趟:只画背景(打底/cell 底色 → 背景批);选区覆盖在 cell 底色之上。
 			// 宽字符续列不单独画:首格按宽 2 一次画(底色与选区列对齐)。
@@ -381,6 +373,16 @@ drawConsole :: proc(node_h : mem.Handle, bg : bool) {
 			}
 			continue
 		}
+		resize(&draw_shaped, col_limit)
+		resize(&draw_orig, col_limit)
+		for c in 0 ..< col_limit {
+			g := fnt.GlyphIndex(win.font_id, line.cells[c].cp)
+			draw_orig[c] = g
+			draw_shaped[c] = g
+		}
+		fnt.ShapeLine(win.font_id, &draw_shaped)
+		// 连体合并(未来 type4)会缩短数组;绘制按缩短后的长度截断
+		draw_limit = min(col_limit, len(draw_shaped))
 		// 第 2 趟:连体字形位图会溢出到相邻格(如 --- 的 32px 连体),
 		// 背景已在上趟定稿,此处只画字形。
 		// 字体变体:style key 变化才查询(变体 face / 合成兜底标志),run 内零查表

@@ -95,7 +95,7 @@ initWindows :: proc() -> bool {
 
 	canvas.SetDefaultLaunch(
 		"bash",
-		"Cascadia Code", 26)
+		"CodeNewRoman Nerd Font", 26)
 
 	// 第一页:页根 + 根窗(自动启动默认),成为当前页
 	page := canvas.PageNew()
@@ -105,8 +105,8 @@ initWindows :: proc() -> bool {
 
 	canvas.SetTheme(canvas.GRUVBOX_DARK_THEME)
 
-	render.SetBackgroundShaderEnabled(true)
+	render.SetBackgroundShaderEnabled(false)
 	render.ResetBackgroundShader()
-	render.SetVSync(false)
+	render.SetVSync(true)
 	return true
 }

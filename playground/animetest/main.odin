@@ -61,23 +61,31 @@ main :: proc() {
 	rx, ry = frame(ch1, 160, 200, &t) // t=1032:启动,start_ms=1032
 	check("launch from last", rx == 100, true)
 
-	// ---- 插值断点:k=16/CURSOR_ANIM_MS → QuadOut 精确值 ----
-	rx, ry = frame(ch1, 160, 200, &t) // t=1048
-	k := 16.0 / f64(rnd.CURSOR_ANIM_MS)
-	checkNear("interp mid", rx, 100 + 60.0 * f32(2.0*k - k*k))
-
-	// ---- 到达(≥时长)→ 落真源,active 结束 ----
+	// ---- 插值断点/到达:时长 ≥ 一帧(16ms)才有中间态;否则次帧直落 ----
+	mid := rnd.CURSOR_ANIM_MS >= 16.0
+	if mid {
+		rx, ry = frame(ch1, 160, 200, &t) // t=1048(启动后 16ms)
+		k := 16.0 / f64(rnd.CURSOR_ANIM_MS)
+		checkNear("interp mid", rx, 100 + 60.0 * f32(2.0*k - k*k))
+	}
 	t = 1032 + f64(rnd.CURSOR_ANIM_MS)
-	rx, ry = frame(ch1, 160, 200, &t) // k=1
+	rx, ry = frame(ch1, 160, 200, &t) // 时长后首帧:到达
 	check("arrive after dur", rx == 160, true)
 
 	// ---- 续接:active 中目标再变 → 起点 = 当前渲染值 ----
 	t = 1140.0
 	_, _ = frame(ch1, 300, 200, &t) // 启动 160→300(start_ms=1140)
-	_, _ = frame(ch1, 300, 200, &t) // k=16/时长 → px=160+140*(2k-k²)
+	if mid {
+		_, _ = frame(ch1, 300, 200, &t) // 中间帧 k=16/时长
+	}
 	t = 1172.0
 	rx, ry = frame(ch1, 500, 200, &t) // 目标再变:续接(起点帧返回当前渲染值)
-	checkNear("resume continuous", rx, 160 + 140.0 * f32(2.0*k - k*k))
+	if mid {
+		k16 := 16.0 / f64(rnd.CURSOR_ANIM_MS)
+		checkNear("resume continuous", rx, 160 + 140.0 * f32(2.0*k16 - k16*k16))
+	} else {
+		check("resume fast", rx == 160, true) // 时长≈0:续接帧 k=0 → 返回上一帧渲染值(启动帧的 160)
+	}
 
 	// ---- 双 console 独立:ch2 不动,ch1 动画不受影响 ----
 	_, _ = frame(ch2, 300, 300, &t)
