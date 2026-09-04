@@ -95,7 +95,7 @@ initWindows :: proc() -> bool {
 
 	canvas.SetDefaultLaunch(
 		"bash",
-		"CodeNewRoman Nerd Font", 26)
+		"CodeNewRoman Nerd Font Mono", 26)
 
 	// 第一页:页根 + 根窗(自动启动默认),成为当前页
 	page := canvas.PageNew()
@@ -108,5 +108,10 @@ initWindows :: proc() -> bool {
 	render.SetBackgroundShaderEnabled(false)
 	render.ResetBackgroundShader()
 	render.SetVSync(true)
+
+	// 无边框窗口(去除系统标题栏/边框,render 内容不变);
+	// 无边框后窗口无法用标题栏拖动/边缘缩放(后续按需加自绘拖拽或 F11 全屏)
+	render.SetWindowBorderless(true)
+
 	return true
 }
